@@ -18,7 +18,7 @@ if sys.platform == 'win32':
     raise unittest.SkipTest('GTK popup host is not used on Windows')
 
 from usage_monitor_for_claude.platforms.popup_linux import (  # noqa: E402
-    _KEY_ESCAPE, _MARGIN, WINDOW_KWARGS, PopupHost, popup_url,
+    _FOCUS_SETTLE_SECONDS, _KEY_ESCAPE, _MARGIN, REUSE_WINDOW, WINDOW_KWARGS, PopupHost, popup_url,
 )
 
 WIDTH = 340
@@ -300,6 +300,117 @@ class TestDismissWatch(unittest.TestCase):
         host, _gtk_window, _thread = self._watching(lambda: True)
         self.assertFalse(host._on_focus_out())
         self.assertFalse(host._on_key_press(None, MagicMock(keyval=_KEY_ESCAPE)))
+
+    def test_focus_out_right_after_the_reveal_is_ignored(self):
+        """The compositor reports one for a window it has just mapped; that is not the user leaving."""
+        host, _gtk_window, thread = self._watching(lambda: True)
+        with patch('usage_monitor_for_claude.platforms.popup_linux.time.monotonic', return_value=100.0):
+            host._focus_settled_at = 100.0 + _FOCUS_SETTLE_SECONDS
+            host._on_focus_out()
+        thread.join(timeout=0.5)
+        self.assertTrue(thread.is_alive())
+
+    def test_focus_out_after_the_settle_period_dismisses(self):
+        """Once the window has settled, losing focus closes an unpinned popup again."""
+        host, _gtk_window, thread = self._watching(lambda: True)
+        with patch('usage_monitor_for_claude.platforms.popup_linux.time.monotonic', return_value=100.0):
+            host._focus_settled_at = 100.0
+            host._on_focus_out()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+
+    def _focus_out_in_settle(self, should_dismiss=True):
+        """Deliver a focus-out inside the settle period; return the host, window and the scheduled check."""
+        host, gtk_window = _host()
+        host._should_dismiss = lambda: should_dismiss
+        fake_glib = MagicMock()
+        with patch('usage_monitor_for_claude.platforms.popup_linux.time.monotonic', return_value=100.0), \
+             patch.dict(sys.modules, {'gi.repository': MagicMock(GLib=fake_glib)}):
+            host._focus_settled_at = 100.0 + _FOCUS_SETTLE_SECONDS
+            host._on_focus_out(gtk_window)
+
+        return host, gtk_window, fake_glib
+
+    def test_focus_out_in_the_settle_period_schedules_a_recheck(self):
+        """The recheck fires just after the period, so a user who clicked away at once is not left with an open popup."""
+        _host_, _gtk_window, fake_glib = self._focus_out_in_settle()
+        delay, _check = fake_glib.timeout_add.call_args.args
+        self.assertEqual(delay, round(_FOCUS_SETTLE_SECONDS * 1000) + 50)
+
+    def test_recheck_dismisses_a_window_that_still_has_no_focus(self):
+        host, gtk_window, fake_glib = self._focus_out_in_settle()
+        gtk_window.has_toplevel_focus.return_value = False
+        fake_glib.timeout_add.call_args.args[1]()
+        self.assertTrue(host._dismissed.is_set())
+
+    def test_recheck_keeps_a_window_that_regained_focus(self):
+        """The compositor's focus-out for a freshly mapped window is followed by the focus coming back."""
+        host, gtk_window, fake_glib = self._focus_out_in_settle()
+        gtk_window.has_toplevel_focus.return_value = True
+        fake_glib.timeout_add.call_args.args[1]()
+        self.assertFalse(host._dismissed.is_set())
+
+    def test_recheck_keeps_a_pinned_popup(self):
+        host, gtk_window, fake_glib = self._focus_out_in_settle(should_dismiss=False)
+        gtk_window.has_toplevel_focus.return_value = False
+        fake_glib.timeout_add.call_args.args[1]()
+        self.assertFalse(host._dismissed.is_set())
+
+    def test_recheck_of_an_earlier_opening_is_ignored(self):
+        """A check left over from the previous opening must not close the popup that replaced it."""
+        host, gtk_window, fake_glib = self._focus_out_in_settle()
+        gtk_window.has_toplevel_focus.return_value = False
+        host._reveal_count += 1
+        fake_glib.timeout_add.call_args.args[1]()
+        self.assertFalse(host._dismissed.is_set())
+
+    def test_focus_out_without_a_window_schedules_nothing(self):
+        host, _gtk_window = _host()
+        fake_glib = MagicMock()
+        with patch('usage_monitor_for_claude.platforms.popup_linux.time.monotonic', return_value=100.0), \
+             patch.dict(sys.modules, {'gi.repository': MagicMock(GLib=fake_glib)}):
+            host._focus_settled_at = 100.0 + _FOCUS_SETTLE_SECONDS
+            host._on_focus_out()
+        fake_glib.timeout_add.assert_not_called()
+
+    def test_reveal_starts_the_settle_period(self):
+        """Every opening gets its own grace period, not only the first."""
+        host, _gtk_window = _host()
+        with patch.object(host, '_anchor', return_value=None), \
+             patch('usage_monitor_for_claude.platforms.popup_linux.time.monotonic', return_value=50.0):
+            host.reveal()
+        self.assertEqual(host._focus_settled_at, 50.0 + _FOCUS_SETTLE_SECONDS)
+
+    def test_signals_are_connected_once_across_watches(self):
+        """The window is kept between openings, so a second watch must not stack handlers."""
+        host, gtk_window = _host()
+        host._connect_dismiss_signals(gtk_window)
+        host._connect_dismiss_signals(gtk_window)
+        connects = [name for name, _args, _kwargs in gtk_window.method_calls if name == 'connect']
+        self.assertEqual(len(connects), 2)
+
+
+class TestHide(unittest.TestCase):
+    """Tests for taking the popup off screen without destroying its window."""
+
+    def test_hide_hides_the_gtk_window(self):
+        """The window stays alive; it is only unmapped."""
+        window = MagicMock()
+        host, gtk_window = _host(window)
+        host.hide()
+        gtk_window.hide.assert_called_once()
+        window.destroy.assert_not_called()
+
+    def test_hide_ends_a_drag_in_progress(self):
+        """A drag left over from the previous opening must not carry into the next."""
+        host, _gtk_window = _host()
+        host._dragging = True
+        host.hide()
+        self.assertFalse(host._dragging)
+
+    def test_this_platform_reuses_its_window(self):
+        """GTK leaves a web and network process behind for every destroyed window."""
+        self.assertTrue(REUSE_WINDOW)
 
 
 class TestDrag(unittest.TestCase):

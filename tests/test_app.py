@@ -1772,6 +1772,16 @@ class TestMenuActions(unittest.TestCase):
             self.app.on_show_popup()
             mock_thread.assert_not_called()
 
+    def test_open_popup_passes_the_window_cache(self):
+        """Every opening shares the app's window cache, so the popup window outlives it."""
+        self.app._popup_open = True
+        with patch('usage_monitor_for_claude.app.UsagePopup') as mock_popup, \
+             patch('usage_monitor_for_claude.app.threading.Thread'):
+            self.app._open_popup()
+
+        mock_popup.assert_called_once_with(self.app, self.app._popup_windows)
+        self.assertFalse(self.app._popup_open)
+
     def test_on_quit_stops_running(self):
         """on_quit() sets running to False and stops the icon."""
         self.app.on_quit()

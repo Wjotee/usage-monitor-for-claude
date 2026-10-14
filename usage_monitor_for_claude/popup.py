@@ -25,12 +25,12 @@ from . import __version__
 from .claude_cli import CHANGELOG_URL, find_installations
 from .formatting import divider_positions, elapsed_pct, expand_popup_fields, field_period, format_credits, popup_label, time_until
 from .i18n import T
-from .platforms.popup import WINDOW_KWARGS, PopupHost, popup_url
+from .platforms.popup import REUSE_WINDOW, WINDOW_KWARGS, PopupHost, popup_url
 from .settings import BAR_BG, BAR_DIVIDER, BAR_FG, BAR_FG_WARN, BAR_MARKER, BG, COMPACT_HIDE, FG, FG_DIM, FG_HEADING, FG_LINK, POPUP_FIELDS
 
 _POPUP_DIR = Path(__file__).parent / 'popup'
 
-__all__ = ['UsagePopup']
+__all__ = ['PopupWindowCache', 'UsagePopup', 'new_window_cache']
 
 if TYPE_CHECKING:
     from .app import UsageMonitorForClaude
@@ -234,6 +234,119 @@ class _PopupApi:
         self._popup._apply_height(height)
 
 
+def _create_window(api: _PopupApi) -> Any:
+    """Create the hidden, frameless popup window.  Its document loads on its own."""
+    return webview.create_window(
+        '', url=popup_url(_POPUP_DIR / 'popup.html'),
+        width=UsagePopup.WIDTH, height=UsagePopup._INITIAL_HEIGHT,
+        frameless=True, easy_drag=False,
+        on_top=True, hidden=True,
+        background_color=BG,
+        js_api=api,
+        **WINDOW_KWARGS,
+    )
+
+
+class PopupWindowCache:
+    """Keeps one popup window alive between openings.
+
+    Every pywebview window brings up its own WebKit web and network process on
+    GTK, and ``destroy()`` does not stop them, so each destroyed window would
+    hold roughly 200 MB until the app quits.  The window is therefore created
+    on the first opening, hidden on close and reloaded on the next opening.
+
+    The reload hands popup.js a fresh document.  That is deliberate: ``init()``
+    registers its listeners without removing any, so calling it a second time
+    on the same document would double every click and drag handler.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._window: Any = None
+        self._host: Any = None
+        self._api: _PopupApi | None = None
+        self._popup: UsagePopup | None = None
+
+    def attach(self, popup: UsagePopup) -> None:
+        """Give *popup* the shared window, creating it on first use.
+
+        ``popup._window`` and ``popup._host`` are set before the window can
+        deliver any event to the popup.
+        """
+        with self._lock:
+            self._popup = popup
+            window = self._window
+            if window is None:
+                self._create(popup)
+                return
+
+            self._api._popup = popup  # type: ignore[union-attr]  # set together with the window
+            popup._window, popup._host = window, self._host
+
+        try:
+            window.load_url(popup_url(_POPUP_DIR / 'popup.html'))
+        except Exception:
+            # A window that cannot be reloaded is no use; start over with a new one.
+            self._discard(window)
+            with self._lock:
+                self._popup = popup
+                self._create(popup)
+
+    def release(self, popup: UsagePopup) -> None:
+        """Hide the window after *popup* closed, keeping it for the next opening."""
+        with self._lock:
+            if self._popup is not popup:
+                return
+
+            self._popup = None
+            host = self._host
+
+        if host is not None:
+            host.hide()
+
+    def _create(self, popup: UsagePopup) -> None:
+        """Create the shared window for *popup*.  The caller holds the lock."""
+        self._api = _PopupApi(popup)
+        window = self._window = _create_window(self._api)
+        self._host = PopupHost(window, popup.WIDTH)
+        popup._window, popup._host = window, self._host
+        window.events.loaded += lambda: self._on_loaded(window)
+        window.events.closed += lambda: self._on_closed(window)
+
+    def _discard(self, window: Any) -> None:
+        """Forget *window* and destroy it as far as that works."""
+        with self._lock:
+            if self._window is window:
+                self._window = self._host = self._api = None
+
+        try:
+            window.destroy()
+        except Exception:
+            pass
+
+    def _on_loaded(self, window: Any) -> None:
+        popup = self._popup
+        if popup is not None and window is self._window:
+            popup._on_loaded()
+
+    def _on_closed(self, window: Any) -> None:
+        """The window is gone for good (app shutdown); the next opening makes a new one."""
+        with self._lock:
+            if window is not self._window:
+                return
+
+            popup, self._popup = self._popup, None
+            self._window = self._host = self._api = None
+
+        if popup is not None:
+            popup._on_window_closed()
+
+
+def new_window_cache() -> PopupWindowCache | None:
+    """Return the window cache for this platform, or None where windows are not reused."""
+    return PopupWindowCache() if REUSE_WINDOW else None
+
+
 # ---------------------------------------------------------------------------
 # Popup window
 # ---------------------------------------------------------------------------
@@ -245,7 +358,7 @@ class UsagePopup:
     _CHECK_MS = 2000
     _INITIAL_HEIGHT = 400
 
-    def __init__(self, app: UsageMonitorForClaude) -> None:
+    def __init__(self, app: UsageMonitorForClaude, window_cache: PopupWindowCache | None = None) -> None:
         """Create and display a popup window with usage details.
 
         Blocks the calling thread until the window is closed.
@@ -255,9 +368,14 @@ class UsagePopup:
         ----------
         app : UsageMonitorForClaude
             Parent application providing ``cache`` for data access.
+        window_cache : PopupWindowCache, optional
+            Keeps the window alive between openings.  Without it the window is
+            created here and destroyed again when the popup closes.
         """
         self.app = app
+        self._window_cache = window_cache
         self._running = True
+        self._close_started = False
         self._pinned = False
         self._moved_while_pinned = False
         self._shown = False
@@ -271,18 +389,13 @@ class UsagePopup:
         self._last_height = 0
         self._last_version = app.cache.snapshot.version
 
-        self._window = webview.create_window(
-            '', url=popup_url(_POPUP_DIR / 'popup.html'),
-            width=self.WIDTH, height=self._INITIAL_HEIGHT,
-            frameless=True, easy_drag=False,
-            on_top=True, hidden=True,
-            background_color=BG,
-            js_api=_PopupApi(self),
-            **WINDOW_KWARGS,
-        )
-        self._host = PopupHost(self._window, self.WIDTH)
-        self._window.events.loaded += self._on_loaded
-        self._window.events.closed += self._on_window_closed
+        if window_cache is None:
+            self._window = _create_window(_PopupApi(self))
+            self._host = PopupHost(self._window, self.WIDTH)
+            self._window.events.loaded += self._on_loaded
+            self._window.events.closed += self._on_window_closed
+        else:
+            window_cache.attach(self)
         threading.Thread(target=self._dismiss_watch, daemon=True).start()
         self._closed.wait()
 
@@ -319,7 +432,8 @@ class UsagePopup:
         whole check-resize-reveal sequence.
         """
         with self._geometry_lock:
-            if height == self._last_height:
+            # A kept window can still report a height after this popup closed.
+            if not self._running or height == self._last_height:
                 return
 
             self._last_height = height
@@ -347,12 +461,22 @@ class UsagePopup:
         self._closed.set()
 
     def _close(self) -> None:
+        # The dismiss watch calls this again once the first call has woken it.
+        # With a kept window that second call must not hide the window a
+        # newer popup has taken over by then.
+        if self._close_started:
+            return
+
+        self._close_started = True
         self._running = False
         self._host.stop_watch()
-        try:
-            self._window.destroy()
-        except Exception:
-            pass
+        if self._window_cache is not None:
+            self._window_cache.release(self)
+        else:
+            try:
+                self._window.destroy()
+            except Exception:
+                pass
         self._closed.set()
 
     def _set_pinned(self, pinned: bool) -> bool:

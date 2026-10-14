@@ -17,11 +17,15 @@ import ctypes.wintypes
 import threading
 from typing import Any, Callable
 
-__all__ = ['WINDOW_KWARGS', 'PopupHost', 'popup_url']
+__all__ = ['REUSE_WINDOW', 'WINDOW_KWARGS', 'PopupHost', 'popup_url']
 
 # Extra ``webview.create_window`` options for this platform.  A non-resizable
 # window is what keeps the frameless popup from being dragged by its edges.
 WINDOW_KWARGS = {'resizable': False, 'shadow': False}
+
+# Every opening creates and destroys its own window here; only the GTK host
+# can keep one alive between openings.
+REUSE_WINDOW = False
 
 _BASELINE_DPI = 96
 _GWL_EXSTYLE = -20

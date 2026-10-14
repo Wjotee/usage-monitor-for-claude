@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Windows notifications now show the neutral app logo in their header - previously, on some Windows versions, they showed the live tray icon with a usage percentage that contradicted the message. Notifications now also stay in the Windows notification center for five minutes (thanks to [@zvirja](https://github.com/zvirja) for reporting [#98](https://github.com/jens-duttke/usage-monitor-for-claude/issues/98) and investigating it in [#100](https://github.com/jens-duttke/usage-monitor-for-claude/pull/100))
 - On Linux with a panel at the bottom of the screen, such as the KDE Plasma default, the detail popup now opens directly above the panel - previously it always opened in the top-right corner, at the opposite end of the screen from the tray icon (thanks to [@gurkengraeber](https://github.com/gurkengraeber) for the contribution)
+- On Linux the app no longer grows by about 200 MB each time you open the detail popup - previously every opening left WebKit processes behind until the app quit, adding up to more than 1 GB over a few days (thanks to [@gurkengraeber](https://github.com/gurkengraeber) for the contribution)
 
 ## [1.23.0] - 2026-09-22
 

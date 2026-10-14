@@ -7,13 +7,16 @@ and _init_config.
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 from usage_monitor_for_claude.cache import CacheSnapshot
-from usage_monitor_for_claude.popup import UsagePopup, _init_config, _snapshot_to_dict, _usage_entries
+from usage_monitor_for_claude.popup import (
+    PopupWindowCache, UsagePopup, _init_config, _snapshot_to_dict, _usage_entries, new_window_cache,
+)
 
 
 def _snap(
@@ -776,10 +779,12 @@ class TestDismissWatchShutdown(unittest.TestCase):
 
         popup = object.__new__(UsagePopup)
         popup._running = True
+        popup._close_started = False
         popup._pinned = pinned
         popup._shown = True
         popup._closed = threading.Event()
         popup._window = MagicMock()
+        popup._window_cache = None
         popup._host = host
 
         thread = threading.Thread(target=popup._dismiss_watch, daemon=True)
@@ -989,6 +994,277 @@ class TestUpdateLoopResilience(unittest.TestCase):
 
         self.assertEqual(popup._window.evaluate_js.call_count, 2)
         self.assertEqual(popup._last_version, 1)
+
+
+# ---------------------------------------------------------------------------
+# Window reuse
+# ---------------------------------------------------------------------------
+
+class _FakeEvent:
+    """Stands in for a pywebview event: ``+=`` registers a handler, fire() delivers."""
+
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+    def fire(self):
+        for handler in list(self.handlers):
+            handler()
+
+
+def _fake_window():
+    window = MagicMock()
+    window.events.loaded = _FakeEvent()
+    window.events.closed = _FakeEvent()
+
+    return window
+
+
+class TestPopupWindowCache(unittest.TestCase):
+    """Tests for keeping one popup window alive between openings.
+
+    On GTK every destroyed window leaves its WebKit processes behind, so the
+    cache must create the window once and only hide and reload it afterwards.
+    """
+
+    def setUp(self):
+        self.windows = []
+
+        def create_window(*_args, **_kwargs):
+            window = _fake_window()
+            self.windows.append(window)
+
+            return window
+
+        for target in ('webview', 'PopupHost'):
+            patcher = patch(f'usage_monitor_for_claude.popup.{target}')
+            mock = patcher.start()
+            self.addCleanup(patcher.stop)
+            setattr(self, target, mock)
+
+        self.webview.create_window.side_effect = create_window
+        self.host = self.PopupHost.return_value
+        self.cache = PopupWindowCache()
+
+    def test_first_attach_creates_the_window_and_hands_it_over(self):
+        popup = MagicMock()
+        self.cache.attach(popup)
+        self.webview.create_window.assert_called_once()
+        self.assertIs(popup._window, self.windows[0])
+        self.assertIs(popup._host, self.host)
+
+    def test_first_attach_does_not_reload(self):
+        """A new window loads its document on its own."""
+        self.cache.attach(MagicMock())
+        self.windows[0].load_url.assert_not_called()
+
+    def test_later_attach_reuses_the_window_and_reloads_it(self):
+        """A fresh document resets popup.js, whose init() cannot run twice."""
+        first, second = MagicMock(), MagicMock()
+        self.cache.attach(first)
+        self.cache.release(first)
+        self.cache.attach(second)
+
+        self.webview.create_window.assert_called_once()
+        self.assertIs(second._window, self.windows[0])
+        self.assertIs(second._host, self.host)
+        self.windows[0].load_url.assert_called_once()
+        self.assertTrue(self.windows[0].load_url.call_args.args[0].endswith('popup.html'))
+
+    def test_js_api_follows_the_current_popup(self):
+        """The JS bridge was bound when the window was created and must now serve the new popup."""
+        first, second = MagicMock(), MagicMock()
+        self.cache.attach(first)
+        api = self.webview.create_window.call_args.kwargs['js_api']
+        self.assertIs(api._popup, first)
+
+        self.cache.release(first)
+        self.cache.attach(second)
+        self.assertIs(api._popup, second)
+
+    def test_release_hides_the_window_instead_of_destroying_it(self):
+        popup = MagicMock()
+        self.cache.attach(popup)
+        self.cache.release(popup)
+        self.host.hide.assert_called_once()
+        self.windows[0].destroy.assert_not_called()
+
+    def test_release_by_a_superseded_popup_leaves_the_window_alone(self):
+        """A late close of the old popup must not hide the window a newer one is using."""
+        old, new = MagicMock(), MagicMock()
+        self.cache.attach(old)
+        self.cache.attach(new)
+        self.cache.release(old)
+        self.host.hide.assert_not_called()
+
+    def test_loaded_event_reaches_only_the_current_popup(self):
+        popup = MagicMock()
+        self.cache.attach(popup)
+        self.windows[0].events.loaded.fire()
+        popup._on_loaded.assert_called_once()
+
+        self.cache.release(popup)
+        self.windows[0].events.loaded.fire()
+        popup._on_loaded.assert_called_once()
+
+    def test_closed_window_is_replaced_on_the_next_opening(self):
+        """When the window is gone for good, the next opening builds a new one."""
+        first, second = MagicMock(), MagicMock()
+        self.cache.attach(first)
+        self.windows[0].events.closed.fire()
+        first._on_window_closed.assert_called_once()
+
+        self.cache.attach(second)
+        self.assertEqual(self.webview.create_window.call_count, 2)
+        self.assertIs(second._window, self.windows[1])
+
+    def test_window_that_cannot_be_reloaded_is_replaced(self):
+        first, second = MagicMock(), MagicMock()
+        self.cache.attach(first)
+        self.cache.release(first)
+        self.windows[0].load_url.side_effect = RuntimeError('shown event never arrived')
+
+        self.cache.attach(second)
+
+        self.windows[0].destroy.assert_called_once()
+        self.assertEqual(self.webview.create_window.call_count, 2)
+        self.assertIs(second._window, self.windows[1])
+
+    def test_closed_event_of_a_discarded_window_is_ignored(self):
+        """Only the window currently in use may take the popup down with it."""
+        first, second = MagicMock(), MagicMock()
+        self.cache.attach(first)
+        self.cache.release(first)
+        self.windows[0].load_url.side_effect = RuntimeError('reload failed')
+        self.cache.attach(second)
+
+        self.windows[0].events.closed.fire()
+
+        second._on_window_closed.assert_not_called()
+        self.assertIs(second._window, self.windows[1])
+
+    def test_loaded_event_of_a_discarded_window_is_ignored(self):
+        """A late load of the replaced window must not initialise the popup a second time."""
+        first, second = MagicMock(), MagicMock()
+        self.cache.attach(first)
+        self.cache.release(first)
+        self.windows[0].load_url.side_effect = RuntimeError('reload failed')
+        self.cache.attach(second)
+
+        self.windows[0].events.loaded.fire()
+        second._on_loaded.assert_not_called()
+
+        self.windows[1].events.loaded.fire()
+        second._on_loaded.assert_called_once()
+
+
+class TestPopupWithWindowCache(unittest.TestCase):
+    """Tests for how UsagePopup treats a kept window."""
+
+    def _popup(self, cache):
+        popup = object.__new__(UsagePopup)
+        popup._running = True
+        popup._close_started = False
+        popup._shown = True
+        popup._last_height = 0
+        popup._closed = threading.Event()
+        popup._geometry_lock = threading.Lock()
+        popup._window = MagicMock()
+        popup._host = MagicMock()
+        popup._window_cache = cache
+
+        return popup
+
+    def test_close_releases_the_window_to_the_cache(self):
+        cache = MagicMock()
+        popup = self._popup(cache)
+        popup._close()
+        cache.release.assert_called_once_with(popup)
+        popup._window.destroy.assert_not_called()
+        self.assertTrue(popup._closed.is_set())
+
+    def test_close_without_a_cache_destroys_the_window(self):
+        popup = self._popup(None)
+        popup._close()
+        popup._window.destroy.assert_called_once()
+
+    def test_second_close_does_nothing(self):
+        """The dismiss watch closes again after waking; by then a newer popup may own the window."""
+        cache = MagicMock()
+        popup = self._popup(cache)
+        popup._close()
+        popup._close()
+        cache.release.assert_called_once()
+        popup._host.stop_watch.assert_called_once()
+
+    def test_height_report_after_close_is_ignored(self):
+        """A kept window keeps reporting; a closed popup must not move it."""
+        popup = self._popup(MagicMock())
+        popup._close()
+        popup._apply_height(500)
+        popup._host.apply_geometry.assert_not_called()
+        popup._host.reveal.assert_not_called()
+
+    def test_second_opening_reuses_the_window(self):
+        """The constructor blocks until the popup closes, so each opening runs on its own thread."""
+        windows = []
+
+        def create_window(*_args, **_kwargs):
+            windows.append(_fake_window())
+
+            return windows[-1]
+
+        cache = PopupWindowCache()
+        with patch.object(UsagePopup, '_dismiss_watch', lambda self: None), \
+             patch('usage_monitor_for_claude.popup.PopupHost'), \
+             patch('usage_monitor_for_claude.popup.webview') as mock_webview:
+            mock_webview.create_window.side_effect = create_window
+
+            def open_popup():
+                previous = cache._popup
+                thread = threading.Thread(target=lambda: UsagePopup(MagicMock(), cache), daemon=True)
+                thread.start()
+                deadline = time.time() + 2.0
+                while cache._popup in (None, previous) and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertIsNot(cache._popup, previous)
+
+                return cache._popup, thread
+
+            first, first_thread = open_popup()
+            first._close()
+            first_thread.join(timeout=2)
+            self.assertFalse(first_thread.is_alive())
+
+            second, second_thread = open_popup()
+            self.addCleanup(second._closed.set)
+
+            self.assertEqual(mock_webview.create_window.call_count, 1)
+            windows[0].load_url.assert_called_once()
+            self.assertIsNot(first, second)
+            self.assertIs(second._window, windows[0])
+
+            second._close()
+            second_thread.join(timeout=2)
+
+
+class TestNewWindowCache(unittest.TestCase):
+    """Tests for choosing between a kept window and one window per opening."""
+
+    def test_platform_decides(self):
+        with patch('usage_monitor_for_claude.popup.REUSE_WINDOW', True):
+            self.assertIsInstance(new_window_cache(), PopupWindowCache)
+        with patch('usage_monitor_for_claude.popup.REUSE_WINDOW', False):
+            self.assertIsNone(new_window_cache())
+
+    def test_only_the_gtk_host_reuses_its_window(self):
+        """The Windows host creates and destroys a window for every opening."""
+        from usage_monitor_for_claude.platforms.popup import REUSE_WINDOW
+
+        self.assertEqual(REUSE_WINDOW, sys.platform != 'win32')
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ from .settings import (
 )
 from .formatting import elapsed_pct, field_period, format_credits, format_tooltip, is_active_quota, parse_field_name, popup_label
 from .i18n import T
-from .popup import UsagePopup
+from .popup import UsagePopup, new_window_cache
 from .tray_icon import create_icon_image, create_status_image
 
 __all__ = ['UsageMonitorForClaude', 'crash_log']
@@ -134,6 +134,8 @@ class UsageMonitorForClaude:
         self._popup_lock = threading.Lock()
         self._popup_open = False
         self._popup_closed_at = 0.0
+        # Keeps the popup window between openings (None where windows are not reused).
+        self._popup_windows = new_window_cache()
         self._next_poll_time: float | None = None
 
         # Theme state
@@ -347,7 +349,7 @@ class UsageMonitorForClaude:
                     if needs_refresh:
                         self.update()
                 threading.Thread(target=_bg_refresh, daemon=True).start()
-            UsagePopup(self)
+            UsagePopup(self, self._popup_windows)
         finally:
             self._popup_closed_at = time.time()
             self._popup_open = False
