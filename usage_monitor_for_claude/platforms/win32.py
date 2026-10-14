@@ -28,7 +28,7 @@ from ..instance_id import config_dir_suffix, effective_config_dir, is_default_co
 
 __all__ = [
     'AUTOSTART_REG_BASE_NAME', 'AUTOSTART_REG_KEY', 'DIAGNOSTIC_PACKAGES', 'ask_yes_no',
-    'autostart_supported', 'install_tray_click_handler', 'prepare_gui_environment', 'set_dpi_awareness',
+    'autostart_supported', 'install_tray_activate_handler', 'install_tray_click_handler', 'prepare_gui_environment', 'set_dpi_awareness',
     'diagnostic_display_rows', 'diagnostic_post_init_rows', 'diagnostic_runtime_rows',
     'diagnostic_system_rows', 'double_click_seconds', 'get_idle_seconds',
     'is_autostart_enabled', 'is_screensaver_running', 'is_workstation_locked', 'load_font', 'no_window_kwargs',
@@ -646,6 +646,15 @@ def diagnostic_post_init_rows() -> list[tuple[str, str]]:
 # Tray mouse messages, delivered by the shell as the WM_NOTIFY lParam.
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
+
+
+def install_tray_activate_handler(on_activate: Callable[[], None]) -> bool:
+    """Report that no activate handler is needed.
+
+    pystray receives the left-click itself and fires the default menu item,
+    so there is nothing to install.
+    """
+    return False
 
 
 def install_tray_click_handler(

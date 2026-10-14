@@ -20,7 +20,8 @@ if IS_WINDOWS:
     from .win32 import (
         DIAGNOSTIC_PACKAGES, ask_yes_no, autostart_supported, diagnostic_display_rows, diagnostic_post_init_rows,
         diagnostic_runtime_rows, diagnostic_system_rows, double_click_seconds, get_idle_seconds,
-        install_tray_click_handler, is_autostart_enabled, is_screensaver_running, is_workstation_locked, load_font, no_window_kwargs,
+        install_tray_activate_handler, install_tray_click_handler, is_autostart_enabled, is_screensaver_running,
+        is_workstation_locked, load_font, no_window_kwargs,
         prepare_gui_environment, register_notification_identity, set_autostart, set_dpi_awareness,
         setup_console, show_error_box, show_notification,
         show_topmost_error, show_warning_box, sync_autostart_path, system_time_format,
@@ -30,7 +31,8 @@ else:
     from .linux import (
         DIAGNOSTIC_PACKAGES, ask_yes_no, autostart_supported, diagnostic_display_rows, diagnostic_post_init_rows,
         diagnostic_runtime_rows, diagnostic_system_rows, double_click_seconds, get_idle_seconds,
-        install_tray_click_handler, is_autostart_enabled, is_screensaver_running, is_workstation_locked, load_font, no_window_kwargs,
+        install_tray_activate_handler, install_tray_click_handler, is_autostart_enabled, is_screensaver_running,
+        is_workstation_locked, load_font, no_window_kwargs,
         prepare_gui_environment, register_notification_identity, set_autostart, set_dpi_awareness,
         setup_console, show_error_box, show_notification,
         show_topmost_error, show_warning_box, sync_autostart_path, system_time_format,
@@ -40,8 +42,8 @@ else:
 __all__ = [
     'DIAGNOSTIC_PACKAGES', 'IS_WINDOWS', 'ask_yes_no', 'autostart_supported', 'diagnostic_display_rows',
     'diagnostic_post_init_rows', 'diagnostic_runtime_rows', 'diagnostic_system_rows',
-    'double_click_seconds', 'get_idle_seconds', 'install_tray_click_handler', 'is_autostart_enabled',
-    'is_screensaver_running', 'is_workstation_locked',
+    'double_click_seconds', 'get_idle_seconds', 'install_tray_activate_handler', 'install_tray_click_handler',
+    'is_autostart_enabled', 'is_screensaver_running', 'is_workstation_locked',
     'load_font', 'no_window_kwargs', 'prepare_gui_environment', 'register_notification_identity', 'set_autostart',
     'set_dpi_awareness', 'setup_console', 'show_error_box', 'show_notification', 'show_topmost_error', 'show_warning_box',
     'sync_autostart_path', 'system_time_format', 'taskbar_uses_light_theme', 'watch_theme_change',

@@ -1046,6 +1046,16 @@ class TestSetupConsole(unittest.TestCase):
         mock_ctypes.windll.kernel32.AttachConsole.assert_called_once_with(-1)
 
 
+class TestInstallTrayActivateHandler(unittest.TestCase):
+
+    def test_reports_nothing_to_install(self):
+        """pystray delivers the left-click itself, so the callback must stay unused."""
+        on_activate = MagicMock()
+
+        self.assertFalse(win32.install_tray_activate_handler(on_activate))
+        on_activate.assert_not_called()
+
+
 class TestInstallTrayClickHandler(unittest.TestCase):
     """Tests for the double-click dispatcher grafted onto pystray."""
 

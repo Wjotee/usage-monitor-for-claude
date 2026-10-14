@@ -13,6 +13,7 @@ or GTK is unavailable rather than raising.
 """
 from __future__ import annotations
 
+import atexit
 import functools
 import locale
 import os
@@ -29,7 +30,7 @@ from ..instance_id import config_dir_suffix, effective_config_dir, is_default_co
 
 __all__ = [
     'AUTOSTART_DIRECTORY', 'DIAGNOSTIC_PACKAGES', 'ask_yes_no', 'diagnostic_display_rows',
-    'autostart_supported', 'install_tray_click_handler', 'prepare_gui_environment', 'set_dpi_awareness',
+    'autostart_supported', 'install_tray_activate_handler', 'install_tray_click_handler', 'prepare_gui_environment', 'set_dpi_awareness',
     'diagnostic_post_init_rows', 'diagnostic_runtime_rows', 'diagnostic_system_rows',
     'double_click_seconds', 'get_idle_seconds', 'is_autostart_enabled',
     'is_screensaver_running', 'is_workstation_locked', 'load_font', 'no_window_kwargs', 'register_notification_identity',
@@ -58,6 +59,9 @@ _COLOR_SCHEME_LIGHT = 2  # 0 = no preference, 1 = prefer dark, 2 = prefer light
 
 _DBUS_TIMEOUT_MS = 2000
 _DEFAULT_DOUBLE_CLICK_SECONDS = 0.4
+
+# D-Bus interface the panel talks to the tray icon through.
+_STATUS_NOTIFIER_INTERFACE = 'org.kde.StatusNotifierItem'
 
 # The portal emits a SettingChanged signal, but delivering it needs a GLib main
 # context on this thread, which would collide with the GTK loop the app already
@@ -665,12 +669,64 @@ def install_tray_click_handler(
     """Report that double-click handling is unavailable.
 
     A StatusNotifierItem is drawn and driven by the panel, not by the
-    application: libayatana-appindicator sets ``HAS_DEFAULT_ACTION`` to False,
-    so a click opens the menu and no button event ever reaches this process.
-    There is nothing to defer or swallow, and the double-click command is
-    surfaced through the menu instead.
+    application: libayatana-appindicator sets ``HAS_DEFAULT_ACTION`` to False
+    and no button event ever reaches this process - at most the panel's
+    ``Activate`` call, see :func:`install_tray_activate_handler`, which
+    carries no click count.  There is nothing to defer or swallow, and the
+    double-click command is surfaced through the menu instead.
     """
     return False
+
+
+def install_tray_activate_handler(on_activate: Callable[[], None]) -> bool:
+    """Answer the panel's ``Activate`` call so a left-click runs *on_activate*.
+
+    The indicator libraries pystray loads reject the StatusNotifierItem
+    ``Activate`` method: Canonical's libappindicator and libayatana-appindicator
+    before 0.6.0 do not implement it, and 0.6.0 and later answer it with
+    ``UnknownMethod`` while no handler is connected to the indicator's
+    ``activate`` signal - which pystray never connects.  A panel that calls it
+    on a left-click (KDE Plasma does) gets that error back and falls back to
+    opening the menu.  A filter on the session bus connection the indicator is
+    exported on answers the call before the library sees it, so the click
+    behaves as it does on Windows on every library version; the menu stays on
+    the right-click.  Panels that never call ``Activate`` are unaffected.
+
+    The filter is removed again at exit: the connection outlives the
+    interpreter's ability to run Python code, and a message sent through a
+    filter that can no longer run crashes the process.
+
+    Returns False when PyGObject or the session bus is unavailable.
+    """
+    try:
+        from gi.repository import Gio, GLib
+    except (ImportError, ValueError):
+        return False
+
+    try:
+        connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    except GLib.Error:
+        return False
+
+    def on_message(conn: Any, message: Any, incoming: bool, *_user_data: object) -> Any:
+        """Swallow an incoming ``Activate`` call; pass everything else through."""
+        if not (
+            incoming
+            and message.get_message_type() == Gio.DBusMessageType.METHOD_CALL
+            and message.get_interface() == _STATUS_NOTIFIER_INTERFACE
+            and message.get_member() == 'Activate'
+        ):
+            return message
+
+        conn.send_message(Gio.DBusMessage.new_method_reply(message), Gio.DBusSendMessageFlags.NONE)
+        on_activate()
+
+        return None
+
+    filter_id = connection.add_filter(on_message)
+    atexit.register(connection.remove_filter, filter_id)
+
+    return True
 
 
 def set_dpi_awareness() -> None:

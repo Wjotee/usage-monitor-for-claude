@@ -22,9 +22,9 @@ from .claude_cli import PROJECT_URL
 from .command import run_event_command
 from .instance_id import effective_config_dir, is_default_config_dir
 from .platforms import (
-    autostart_supported, get_idle_seconds, install_tray_click_handler, is_autostart_enabled,
-    is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, show_notification, sync_autostart_path,
-    taskbar_uses_light_theme, watch_theme_change,
+    autostart_supported, get_idle_seconds, install_tray_activate_handler, install_tray_click_handler,
+    is_autostart_enabled, is_screensaver_running, is_workstation_locked, set_autostart, show_error_box,
+    show_notification, sync_autostart_path, taskbar_uses_light_theme, watch_theme_change,
 )
 from .settings import (
     ALERT_EXTRA_USAGE_SPENT, ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, ICON_FIELDS, IDLE_INTERVAL, IDLE_PAUSE,
@@ -193,6 +193,11 @@ class UsageMonitorForClaude:
                 # is where someone looks when the double-click stopped working.
                 print('A quick action is configured, but this system does not report tray double-clicks. '
                       'Use the tray menu entry instead.')
+
+        # Where the panel drives the tray icon, a left-click only reaches this
+        # process as an Activate call, which has to be answered explicitly -
+        # otherwise the panel opens the menu instead of the popup.
+        install_tray_activate_handler(self.on_show_popup)
 
     # Menu actions
 

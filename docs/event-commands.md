@@ -4,7 +4,7 @@ Run a custom shell command when a quota resets, a usage threshold is crossed, th
 
 The examples on this page use Windows PowerShell. They work the same way on Linux with the shell of your choice - only the commands themselves differ (`paplay` or `notify-send` instead of `Media.SoundPlayer`).
 
-How you trigger the quick action depends on the system. On Windows it is a double-click on the tray icon. On Linux the desktop panel handles that click itself and never passes it to the app, so the tray menu carries a **Run Quick Action** entry instead. Both run the same command with the same environment variables.
+How you trigger the quick action depends on the system. On Windows it is a double-click on the tray icon. On Linux the desktop panel does not report a double-click to the app, so the tray menu carries a **Run Quick Action** entry instead. Both run the same command with the same environment variables.
 
 ## Settings
 

@@ -30,7 +30,8 @@ def _make_app(thresholds: list[float] | None = None) -> UsageMonitorForClaude:
         thresholds = [80, 95]
     with patch('usage_monitor_for_claude.app.pystray'), \
          patch('usage_monitor_for_claude.app.create_icon_image'), \
-         patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False):
+         patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False), \
+         patch('usage_monitor_for_claude.app.install_tray_activate_handler'):
         app = UsageMonitorForClaude()
     app.icon = MagicMock()
     # Patches active for the app's lifetime, stopped by _cleanup.  The presence
@@ -3569,7 +3570,8 @@ class TestNotificationIdentityWiring(unittest.TestCase):
     def _app(self, registered):
         with patch('usage_monitor_for_claude.app.pystray'), \
              patch('usage_monitor_for_claude.app.create_icon_image'), \
-             patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False):
+             patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False), \
+             patch('usage_monitor_for_claude.app.install_tray_activate_handler'):
             app = UsageMonitorForClaude(notification_identity_registered=registered)
         app.icon = MagicMock()
 
@@ -3620,6 +3622,36 @@ class TestNotificationIdentityWiring(unittest.TestCase):
         self.assertIs(mock_show.call_args.args[3], True)
 
 
+class TestActivateWiring(unittest.TestCase):
+    """Tests for wiring the panel's left-click to the popup."""
+
+    def _build(self, command, double_click_installed):
+        """Construct an app and return it with the mocked activate installer."""
+        with patch('usage_monitor_for_claude.app.pystray'), \
+             patch('usage_monitor_for_claude.app.create_icon_image'), \
+             patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False), \
+             patch('usage_monitor_for_claude.app.QUICK_ACTION_COMMAND', command), \
+             patch('usage_monitor_for_claude.app.install_tray_click_handler', return_value=double_click_installed), \
+             patch('usage_monitor_for_claude.app.install_tray_activate_handler') as mock_install, \
+             patch('builtins.print'):
+            app = UsageMonitorForClaude()
+
+        return app, mock_install
+
+    def test_left_click_opens_the_popup(self):
+        """Without a quick action the activate handler is installed and opens the popup."""
+        app, mock_install = self._build(command=[], double_click_installed=False)
+
+        mock_install.assert_called_once_with(app.on_show_popup)
+
+    def test_left_click_opens_the_popup_with_a_quick_action(self):
+        """A quick action without double-click support still leaves the left-click on the popup, not on the command."""
+        app, mock_install = self._build(command=['notepad'], double_click_installed=False)
+
+        mock_install.assert_called_once_with(app.on_show_popup)
+        self.assertFalse(app.double_click_installed)
+
+
 class TestDoubleClickWiring(unittest.TestCase):
     """Tests for wiring the optional double-click command to the tray icon."""
 
@@ -3636,6 +3668,7 @@ class TestDoubleClickWiring(unittest.TestCase):
         with patch('usage_monitor_for_claude.app.pystray'), \
              patch('usage_monitor_for_claude.app.create_icon_image'), \
              patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False), \
+             patch('usage_monitor_for_claude.app.install_tray_activate_handler'), \
              patch('usage_monitor_for_claude.app.install_tray_click_handler', return_value=installed) as mock_install, \
              patch('builtins.print') as mock_print:
             app = UsageMonitorForClaude()

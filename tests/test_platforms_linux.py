@@ -575,6 +575,91 @@ class TestInstallTrayClickHandler(unittest.TestCase):
         self.assertEqual(icon._message_handlers, original)
 
 
+class TestInstallTrayActivateHandler(unittest.TestCase):
+    """Tests for answering the panel's Activate call."""
+
+    def setUp(self):
+        self.gio = MagicMock(name='Gio')
+        self.glib = MagicMock(name='GLib')
+        self.glib.Error = type('Error', (Exception,), {})
+        self.connection = self.gio.bus_get_sync.return_value
+        self.on_activate = MagicMock()
+
+        repository = MagicMock(Gio=self.gio, GLib=self.glib)
+        modules = patch.dict(sys.modules, {'gi': MagicMock(repository=repository), 'gi.repository': repository})
+        modules.start()
+        self.addCleanup(modules.stop)
+
+        # Keeps the mocked connection out of the real exit handlers.
+        register = patch.object(linux.atexit, 'register')
+        self.mock_register = register.start()
+        self.addCleanup(register.stop)
+
+    def _filter(self):
+        self.assertTrue(linux.install_tray_activate_handler(self.on_activate))
+
+        return self.connection.add_filter.call_args[0][0]
+
+    def _message(self, member='Activate', interface='org.kde.StatusNotifierItem', message_type=None):
+        message = MagicMock()
+        message.get_message_type.return_value = message_type or self.gio.DBusMessageType.METHOD_CALL
+        message.get_interface.return_value = interface
+        message.get_member.return_value = member
+
+        return message
+
+    def test_activate_is_answered_and_runs_the_action(self):
+        """The call gets a reply - an error would make the panel open the menu - and is consumed."""
+        on_message = self._filter()
+        message = self._message()
+
+        self.assertIsNone(on_message(self.connection, message, True))
+
+        self.gio.DBusMessage.new_method_reply.assert_called_once_with(message)
+        self.connection.send_message.assert_called_once_with(
+            self.gio.DBusMessage.new_method_reply.return_value, self.gio.DBusSendMessageFlags.NONE,
+        )
+        self.on_activate.assert_called_once_with()
+
+    def test_other_messages_pass_through(self):
+        """Everything the indicator library handles itself must reach it untouched."""
+        on_message = self._filter()
+        others = [
+            self._message(member='SecondaryActivate'),
+            self._message(interface='com.canonical.dbusmenu'),
+            self._message(message_type=self.gio.DBusMessageType.SIGNAL),
+        ]
+
+        for message in others:
+            self.assertIs(on_message(self.connection, message, True), message)
+
+        outgoing = self._message()
+        self.assertIs(on_message(self.connection, outgoing, False), outgoing)
+
+        self.connection.send_message.assert_not_called()
+        self.on_activate.assert_not_called()
+
+    def test_filter_is_removed_at_exit(self):
+        """A filter left registered runs during interpreter shutdown and crashes the process."""
+        self.assertTrue(linux.install_tray_activate_handler(self.on_activate))
+
+        self.mock_register.assert_called_once_with(self.connection.remove_filter, self.connection.add_filter.return_value)
+
+    def test_nothing_is_registered_without_a_session_bus(self):
+        """Without a filter there is nothing to clean up."""
+        self.gio.bus_get_sync.side_effect = self.glib.Error
+
+        linux.install_tray_activate_handler(self.on_activate)
+
+        self.mock_register.assert_not_called()
+
+    def test_reports_unavailable_without_a_session_bus(self):
+        """No bus means no panel to answer; the caller must be able to tell."""
+        self.gio.bus_get_sync.side_effect = self.glib.Error
+
+        self.assertFalse(linux.install_tray_activate_handler(self.on_activate))
+
+
 class TestSetDpiAwareness(unittest.TestCase):
 
     def test_is_a_no_op(self):
@@ -612,6 +697,7 @@ class TestImportsWithoutPyGObject(unittest.TestCase):
             'assert linux.taskbar_uses_light_theme() is False\n'
             'assert linux.double_click_seconds() == linux._DEFAULT_DOUBLE_CLICK_SECONDS\n'
             'assert linux.install_tray_click_handler(None, None, None) is False\n'
+            'assert linux.install_tray_activate_handler(None) is False\n'
             'assert linux.set_dpi_awareness() is None\n'
             'assert linux.register_notification_identity() is False\n'
             "assert all('not available' in value for _, value in linux.diagnostic_runtime_rows())\n"
