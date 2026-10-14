@@ -34,11 +34,21 @@ def _host(window=None, gtk_window=None):
     return host, gtk_window
 
 
-def _monitor(work_x=2560, work_y=32, work_width=3440, work_height=1357):
+def _monitor(work_x=2560, work_y=32, work_width=3440, work_height=1357, monitor_y=0, monitor_height=None):
+    """Build a monitor; without *monitor_height* the work area reaches the monitor's bottom edge."""
+    if monitor_height is None:
+        monitor_height = work_y - monitor_y + work_height
+
     monitor = MagicMock()
     monitor.get_workarea.return_value = MagicMock(x=work_x, y=work_y, width=work_width, height=work_height)
+    monitor.get_geometry.return_value = MagicMock(y=monitor_y, height=monitor_height)
 
     return monitor
+
+
+def _bottom_panel_monitor():
+    """A monitor whose only panel reserves 48 pixels at the bottom edge."""
+    return _monitor(work_y=0, work_height=1032, monitor_height=1080)
 
 
 class TestWindowOptions(unittest.TestCase):
@@ -62,10 +72,59 @@ class TestAnchor(unittest.TestCase):
         with patch.object(host, '_primary_monitor', return_value=_monitor()):
             self.assertEqual(host._anchor(), (2560 + 3440 - WIDTH - _MARGIN, 32 + _MARGIN))
 
+    def test_anchors_to_bottom_right_above_a_bottom_panel(self):
+        """Space reserved at the bottom and none at the top puts the tray in the bottom corner."""
+        host, _ = _host()
+        host._height = 472
+        with patch.object(host, '_primary_monitor', return_value=_bottom_panel_monitor()):
+            self.assertEqual(host._anchor(), (2560 + 3440 - WIDTH - _MARGIN, 1032 - 472 - _MARGIN))
+
+    def test_offset_monitor_with_bottom_panel_anchors_to_bottom(self):
+        """The work area is compared against the monitor's own edges, not against zero."""
+        host, _ = _host()
+        host._height = 472
+        monitor = _monitor(work_y=300, work_height=1032, monitor_y=300, monitor_height=1080)
+        with patch.object(host, '_primary_monitor', return_value=monitor):
+            _x, y = host._anchor()
+        self.assertEqual(y, 300 + 1032 - 472 - _MARGIN)
+
+    def test_offset_monitor_with_top_panel_anchors_to_top(self):
+        """A top panel is recognized on a monitor that does not start at the root origin."""
+        host, _ = _host()
+        host._height = 472
+        with patch.object(host, '_primary_monitor', return_value=_monitor(work_y=332, monitor_y=300)):
+            _x, y = host._anchor()
+        self.assertEqual(y, 332 + _MARGIN)
+
+    def test_work_area_equal_to_the_monitor_keeps_the_top_corner(self):
+        """A fullscreen window, an auto-hiding panel and a missing primary monitor all report no reserved space."""
+        host, _ = _host()
+        host._height = 472
+        with patch.object(host, '_primary_monitor', return_value=_monitor(work_y=0, work_height=1080)):
+            _x, y = host._anchor()
+        self.assertEqual(y, _MARGIN)
+
+    def test_side_panel_only_keeps_the_top_corner(self):
+        """A panel on the left or right edge says nothing about top or bottom."""
+        host, _ = _host()
+        host._height = 472
+        monitor = _monitor(work_x=2560 + 64, work_y=0, work_width=3440 - 64, work_height=1080)
+        with patch.object(host, '_primary_monitor', return_value=monitor):
+            self.assertEqual(host._anchor(), (2560 + 3440 - WIDTH - _MARGIN, _MARGIN))
+
+    def test_top_and_bottom_panels_keep_the_top_corner(self):
+        """With a panel on both edges the tray sits in the top one."""
+        host, _ = _host()
+        host._height = 472
+        monitor = _monitor(work_y=32, work_height=1000, monitor_height=1080)
+        with patch.object(host, '_primary_monitor', return_value=monitor):
+            _x, y = host._anchor()
+        self.assertEqual(y, 32 + _MARGIN)
+
     def test_anchor_uses_absolute_coordinates(self):
         """Gtk.Window.move() takes root coordinates, so the monitor origin is included."""
         host, _ = _host()
-        with patch.object(host, '_primary_monitor', return_value=_monitor(work_x=0, work_y=0)):
+        with patch.object(host, '_primary_monitor', return_value=_monitor(work_x=0)):
             x, _y = host._anchor()
         self.assertEqual(x, 3440 - WIDTH - _MARGIN)
 
@@ -96,6 +155,15 @@ class TestPrepareAndReveal(unittest.TestCase):
         order = [name for name, _args, _kwargs in gtk_window.method_calls]
         self.assertLess(order.index('show_all'), order.index('move'))
         self.assertLess(order.index('present'), order.index('move'))
+
+    def test_reveal_positions_a_bottom_anchored_popup_with_its_height(self):
+        """Without the height from apply_geometry() the popup's top edge would land on the panel."""
+        host, gtk_window = _host()
+        with patch.object(host, '_primary_monitor', return_value=_bottom_panel_monitor()):
+            host.apply_geometry(472, keep_position=False)
+            host.reveal()
+
+        self.assertEqual(gtk_window.move.call_args_list[-1].args, (2560 + 3440 - WIDTH - _MARGIN, 1032 - 472 - _MARGIN))
 
     def test_reveal_forces_focus(self):
         """Without focus the window can never emit focus-out, so it could never dismiss."""
@@ -147,6 +215,13 @@ class TestApplyGeometry(unittest.TestCase):
         with patch.object(host, '_primary_monitor', return_value=_monitor()):
             host.apply_geometry(565, keep_position=False)
         gtk_window.move.assert_called_once_with(2560 + 3440 - WIDTH - _MARGIN, 32 + _MARGIN)
+
+    def test_bottom_anchor_follows_the_new_height(self):
+        """Above a bottom panel a taller popup has to move up, or it would grow over the panel."""
+        host, gtk_window = _host()
+        with patch.object(host, '_primary_monitor', return_value=_bottom_panel_monitor()):
+            host.apply_geometry(565, keep_position=False)
+        gtk_window.move.assert_called_once_with(2560 + 3440 - WIDTH - _MARGIN, 1032 - 565 - _MARGIN)
 
     def test_kept_position_resizes_without_moving(self):
         """A moved pinned popup keeps its position when the content height changes."""

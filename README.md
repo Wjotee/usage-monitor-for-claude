@@ -144,7 +144,7 @@ Three notes specific to Linux:
   enables the required GNOME extension by default; on plain GNOME you need
   [AppIndicator support](https://extensions.gnome.org/extension/615/appindicator-support/).
 - **The app runs as an XWayland client.** Wayland does not let a client place its own windows, so
-  the detail popup could not be anchored below the tray icon. The app sets `GDK_BACKEND=x11` itself;
+  the detail popup could not be anchored to the tray corner. The app sets `GDK_BACKEND=x11` itself;
   set that variable explicitly if you want to try the native backend.
 
 On KDE Plasma a left-click opens the detail popup. Where a left-click opens the menu instead, the
