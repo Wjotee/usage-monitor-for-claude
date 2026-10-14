@@ -465,9 +465,19 @@ class TestPrepareGuiEnvironment(unittest.TestCase):
 
 class TestRegisterNotificationIdentity(unittest.TestCase):
 
-    def test_is_a_no_op(self):
+    def test_reports_no_identity(self):
         """Freedesktop notifications carry their icon per message."""
-        self.assertIsNone(linux.register_notification_identity())
+        self.assertIs(linux.register_notification_identity(), False)
+
+
+class TestShowNotification(unittest.TestCase):
+
+    def test_uses_the_tray_icon(self):
+        """Every notification goes through the tray icon, whatever the identity flag says."""
+        for identity_registered in (False, True):
+            icon = MagicMock()
+            linux.show_notification(icon, 'message', 'title', identity_registered)
+            icon.notify.assert_called_once_with('message', 'title')
 
 
 class TestSetupConsole(unittest.TestCase):
@@ -603,7 +613,7 @@ class TestImportsWithoutPyGObject(unittest.TestCase):
             'assert linux.double_click_seconds() == linux._DEFAULT_DOUBLE_CLICK_SECONDS\n'
             'assert linux.install_tray_click_handler(None, None, None) is False\n'
             'assert linux.set_dpi_awareness() is None\n'
-            'assert linux.register_notification_identity() is None\n'
+            'assert linux.register_notification_identity() is False\n'
             "assert all('not available' in value for _, value in linux.diagnostic_runtime_rows())\n"
             "assert linux.diagnostic_post_init_rows() == [('PyGObject', 'not available')]\n",
         )

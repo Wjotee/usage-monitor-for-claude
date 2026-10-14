@@ -23,7 +23,7 @@ from .command import run_event_command
 from .instance_id import effective_config_dir, is_default_config_dir
 from .platforms import (
     autostart_supported, get_idle_seconds, install_tray_click_handler, is_autostart_enabled,
-    is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, sync_autostart_path,
+    is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, show_notification, sync_autostart_path,
     taskbar_uses_light_theme, watch_theme_change,
 )
 from .settings import (
@@ -101,10 +101,18 @@ def _align_to_reset(interval: int, next_reset: float | None) -> tuple[int, bool]
 class UsageMonitorForClaude:
     """System tray application displaying Claude usage."""
 
-    def __init__(self) -> None:
-        """Set up the tray icon with context menu and polling state."""
+    def __init__(self, notification_identity_registered: bool = False) -> None:
+        """Set up the tray icon with context menu and polling state.
+
+        Parameters
+        ----------
+        notification_identity_registered : bool
+            Result of ``register_notification_identity()``, which decides
+            whether notifications may be posted under the app's own identity.
+        """
         self.running = True
         self.cache = UsageCache()
+        self._notification_identity_registered = notification_identity_registered
 
         # Last raw API response (may contain 'error') - for icon and polling decisions
         self._last_response: dict[str, Any] = {}
@@ -411,7 +419,7 @@ class UsageMonitorForClaude:
 
         # Handle CLI update notification from token refresh
         if NOTIFY_CLAUDE_UPDATE and result.token_refresh and result.token_refresh.updated:
-            self.icon.notify(
+            self._notify(
                 T['notify_update'].format(old=result.token_refresh.old_version, new=result.token_refresh.new_version),
                 T['notify_update_title'],
             )
@@ -512,6 +520,10 @@ class UsageMonitorForClaude:
 
     # Notifications
 
+    def _notify(self, message: str, title: str) -> None:
+        """Show a notification under the app's own identity where one is registered."""
+        show_notification(self.icon, message, title, self._notification_identity_registered)
+
     def _notify_or_defer(self, category: str, message: str, title: str) -> None:
         """Show a notification immediately, or defer it if the user is away.
 
@@ -530,7 +542,7 @@ class UsageMonitorForClaude:
             with self._notify_lock:
                 self._deferred_notifications[category] = (message, title)
         else:
-            self.icon.notify(message, title)
+            self._notify(message, title)
 
     def _flush_deferred_notifications(self) -> None:
         """Show all deferred notifications and clear the queue.
@@ -542,7 +554,7 @@ class UsageMonitorForClaude:
         with self._notify_lock:
             pending, self._deferred_notifications = self._deferred_notifications, {}
         for message, title in pending.values():
-            self.icon.notify(message, title)
+            self._notify(message, title)
 
     def _check_threshold_alerts(self, data: dict[str, Any]) -> None:
         """Show a notification when usage crosses a configured threshold.
@@ -1037,7 +1049,7 @@ class UsageMonitorForClaude:
             if autostart_supported():
                 sync_autostart_path()
             if not api_headers():
-                icon.notify(f"{T['warn_no_token']}\n{T['warn_login']}", T['popup_title'])
+                self._notify(f"{T['warn_no_token']}\n{T['warn_login']}", T['popup_title'])
             threading.Thread(target=watch_theme_change, args=(self._on_theme_changed,), daemon=True).start()
             self.poll_loop()
         except Exception:

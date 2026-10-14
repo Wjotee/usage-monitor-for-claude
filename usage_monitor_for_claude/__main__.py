@@ -65,6 +65,7 @@ if _verbose:
     )
 
 _result: dict = {}
+_notification_identity_registered = False
 
 
 def _verbose_step(label: str) -> None:
@@ -81,7 +82,7 @@ def _run_app() -> None:
             print_runtime_diagnostics()
 
         _verbose_step('UsageMonitorForClaude()...')
-        app = UsageMonitorForClaude()
+        app = UsageMonitorForClaude(notification_identity_registered=_notification_identity_registered)
         _verbose_step('UsageMonitorForClaude()... OK')
 
         _verbose_step('app.run...')
@@ -110,7 +111,8 @@ try:
     # Give notifications a fixed logo instead of the live tray icon.
     # Must run before any window is created (AppUserModelID requirement).
     _verbose_step('register_notification_identity...')
-    register_notification_identity()
+    _notification_identity_registered = register_notification_identity()
+    _verbose_step(f'register_notification_identity... {"OK" if _notification_identity_registered else "not registered, using tray balloons"}')
 
     # pywebview requires the main thread for its GUI event loop.
     # A persistent hidden window keeps the loop alive while the

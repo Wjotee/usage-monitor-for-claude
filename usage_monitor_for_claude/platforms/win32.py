@@ -10,12 +10,14 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import functools
+import html
 import msvcrt
 import os
 import platform
 import subprocess
 import sys
 import threading
+import traceback
 import winreg
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -30,7 +32,7 @@ __all__ = [
     'diagnostic_display_rows', 'diagnostic_post_init_rows', 'diagnostic_runtime_rows',
     'diagnostic_system_rows', 'double_click_seconds', 'get_idle_seconds',
     'is_autostart_enabled', 'is_screensaver_running', 'is_workstation_locked', 'load_font', 'no_window_kwargs',
-    'register_notification_identity', 'set_autostart', 'show_error_box', 'show_warning_box',
+    'register_notification_identity', 'set_autostart', 'show_error_box', 'show_notification', 'show_warning_box',
     'setup_console', 'show_topmost_error', 'sync_autostart_path', 'system_time_format',
     'taskbar_uses_light_theme', 'watch_theme_change',
 ]
@@ -62,6 +64,16 @@ _NOTIFICATION_LOGO = Path(__file__).resolve().parent.parent / 'notification_logo
 # HKCU key the shell reads to resolve the identity's display name and icon.
 # A registry entry is enough - no Start Menu shortcut is required.
 _IDENTITY_REG_PATH = r'Software\Classes\AppUserModelId\{}'.format(APP_USER_MODEL_ID)
+
+# Assembly qualifier that lets the .NET Framework resolve a Windows Runtime type.
+_WINRT_TYPE_QUALIFIER = ', Windows, ContentType=WindowsRuntime'
+
+# Seconds a toast stays in the notification center.  Windows keeps using the
+# IconUri it resolved for an AppUserModelID for as long as any toast of that ID
+# is stored there, and a frozen build registers a new logo path on every start.
+# A stored toast that outlived its process would leave the next one without an
+# icon, so toasts must expire.
+_TOAST_LIFETIME_SECONDS = 300
 
 _MB_ICONERROR = 0x10
 _MB_ICONWARNING = 0x30
@@ -293,7 +305,7 @@ def sync_autostart_path() -> None:
         set_autostart(True)
 
 
-def register_notification_identity() -> None:
+def register_notification_identity() -> bool:
     """Adopt a fixed notification identity for this process.
 
     Writes the ``DisplayName`` and ``IconUri`` registration to ``HKCU`` and,
@@ -302,22 +314,109 @@ def register_notification_identity() -> None:
     build extracts the logo to a fresh temporary directory each run, changing
     its path.
 
-    On any failure - a missing logo file or a registry write error - the
-    process keeps its default identity (the live tray icon).  This is never
-    fatal: a notification icon must not stop the app from starting, and
-    falling back to the tray icon is better than an empty one.
+    On any failure - a missing logo file, a registry write error or a
+    rejected ``AppUserModelID`` - the process keeps its default identity.
+    This is never fatal: a notification icon must not stop the app from
+    starting.
+
+    Returns
+    -------
+    bool
+        True when the identity is registered and adopted, which is what
+        :func:`show_notification` needs before it may post a toast under it.
     """
     if not _NOTIFICATION_LOGO.is_file():
-        return
+        return False
 
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _IDENTITY_REG_PATH) as key:
             winreg.SetValueEx(key, 'DisplayName', 0, winreg.REG_SZ, DISPLAY_NAME)
             winreg.SetValueEx(key, 'IconUri', 0, winreg.REG_EXPAND_SZ, str(_NOTIFICATION_LOGO))
     except OSError:
+        return False
+
+    hresult = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(APP_USER_MODEL_ID))
+
+    return hresult == 0
+
+
+def show_notification(icon: Any, message: str, title: str, identity_registered: bool) -> None:
+    """Show a notification under the app's own identity.
+
+    A tray balloon (``icon.notify()``) is not reliably attributed to the
+    process ``AppUserModelID``: on some Windows builds its header shows the
+    live tray icon instead of the registered logo, and the tray icon reflects
+    the most-exhausted quota.  A toast posted through the Windows Runtime
+    names the identity explicitly, so its header always shows the registered
+    name and logo.
+
+    The balloon stays the fallback: without a registered identity a toast
+    could be dropped without an error, and a toast that fails is printed and
+    then shown as a balloon so the message is never lost.
+
+    Parameters
+    ----------
+    icon : pystray.Icon
+        The tray icon, used for the balloon fallback.
+    message : str
+        Notification body.
+    title : str
+        Notification title.
+    identity_registered : bool
+        Result of :func:`register_notification_identity`.
+    """
+    if not identity_registered:
+        icon.notify(message, title)
         return
 
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(ctypes.c_wchar_p(APP_USER_MODEL_ID))
+    try:
+        _show_toast(message, title)
+    except Exception:
+        traceback.print_exc()
+        icon.notify(message, title)
+
+
+def _show_toast(message: str, title: str) -> None:
+    """Post a text-only toast that expires after ``_TOAST_LIFETIME_SECONDS``.
+
+    Runs through pythonnet's .NET Framework runtime, which pywebview's
+    WinForms host already loads, so no Windows Runtime binding package is
+    needed.
+    """
+    import clr  # type: ignore[import-untyped]  # .NET bridge via pythonnet
+
+    clr.AddReference('System.Runtime.WindowsRuntime')
+    from System import Activator, DateTimeOffset, TimeSpan  # type: ignore[import-untyped]  # .NET import via pythonnet
+
+    document = Activator.CreateInstance(_winrt_type('Windows.Data.Xml.Dom.XmlDocument'))
+    document.LoadXml(_toast_xml(message, title))
+
+    toast = Activator.CreateInstance(_winrt_type('Windows.UI.Notifications.ToastNotification'), document)
+    toast.ExpirationTime = DateTimeOffset.Now.Add(TimeSpan.FromSeconds(_TOAST_LIFETIME_SECONDS))
+
+    create_notifier = _winrt_type('Windows.UI.Notifications.ToastNotificationManager').GetMethod('CreateToastNotifier', [clr.GetClrType(str)])
+    create_notifier.Invoke(None, [APP_USER_MODEL_ID]).Show(toast)
+
+
+def _winrt_type(name: str) -> Any:
+    """Resolve a Windows Runtime type by its full name, raising when it is unavailable."""
+    from System import Type  # type: ignore[import-untyped]  # .NET import via pythonnet
+
+    resolved = Type.GetType(name + _WINRT_TYPE_QUALIFIER)
+    if resolved is None:
+        raise RuntimeError(f'Windows Runtime type not available: {name}')
+
+    return resolved
+
+
+def _toast_xml(message: str, title: str) -> str:
+    """Build the toast payload with title and message escaped as XML text."""
+    return (
+        '<toast><visual><binding template="ToastGeneric">'
+        f'<text>{html.escape(title)}</text>'
+        f'<text>{html.escape(message)}</text>'
+        '</binding></visual></toast>'
+    )
 
 
 def setup_console() -> None:

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [Show all code changes](https://github.com/jens-duttke/usage-monitor-for-claude/compare/v1.23.0...HEAD)
 
+### Fixed
+
+- Windows notifications now show the neutral app logo in their header - previously, on some Windows versions, they showed the live tray icon with a usage percentage that contradicted the message. Notifications now also stay in the Windows notification center for five minutes (thanks to [@zvirja](https://github.com/zvirja) for reporting [#98](https://github.com/jens-duttke/usage-monitor-for-claude/issues/98) and investigating it in [#100](https://github.com/jens-duttke/usage-monitor-for-claude/pull/100))
+
 ## [1.23.0] - 2026-09-22
 
 ### Added

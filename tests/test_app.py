@@ -3563,6 +3563,63 @@ class TestAutostartWiring(unittest.TestCase):
         self._ready(supported=False).assert_not_called()
 
 
+class TestNotificationIdentityWiring(unittest.TestCase):
+    """Every notification path hands the registered identity to the platform layer."""
+
+    def _app(self, registered):
+        with patch('usage_monitor_for_claude.app.pystray'), \
+             patch('usage_monitor_for_claude.app.create_icon_image'), \
+             patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False):
+            app = UsageMonitorForClaude(notification_identity_registered=registered)
+        app.icon = MagicMock()
+
+        return app
+
+    def test_defaults_to_no_identity(self):
+        """Without the registration result the app must not assume a toast identity."""
+        app = _make_app()
+        self.addCleanup(_cleanup, app)
+
+        with patch('usage_monitor_for_claude.app.show_notification') as mock_show:
+            app._notify('message', 'title')
+
+        mock_show.assert_called_once_with(app.icon, 'message', 'title', False)
+
+    def test_immediate_notification_passes_identity(self):
+        """A notification shown right away carries the registration result."""
+        app = self._app(registered=True)
+
+        with patch('usage_monitor_for_claude.app.show_notification') as mock_show, \
+             patch.object(app, '_is_user_away', return_value=False):
+            app._notify_or_defer('reset', 'message', 'title')
+
+        mock_show.assert_called_once_with(app.icon, 'message', 'title', True)
+
+    def test_deferred_notification_passes_identity(self):
+        """A notification flushed after the user returns carries it too."""
+        app = self._app(registered=True)
+        app._deferred_notifications = {'reset': ('message', 'title')}
+
+        with patch('usage_monitor_for_claude.app.show_notification') as mock_show:
+            app._flush_deferred_notifications()
+
+        mock_show.assert_called_once_with(app.icon, 'message', 'title', True)
+
+    def test_missing_token_warning_passes_identity(self):
+        """The startup warning about a missing token goes through the same path."""
+        app = self._app(registered=True)
+
+        with patch('usage_monitor_for_claude.app.show_notification') as mock_show, \
+             patch('usage_monitor_for_claude.app.autostart_supported', return_value=False), \
+             patch('usage_monitor_for_claude.app.api_headers', return_value=None), \
+             patch('usage_monitor_for_claude.app.threading.Thread'), \
+             patch.object(app, 'poll_loop'):
+            app._on_icon_ready(app.icon)
+
+        mock_show.assert_called_once()
+        self.assertIs(mock_show.call_args.args[3], True)
+
+
 class TestDoubleClickWiring(unittest.TestCase):
     """Tests for wiring the optional double-click command to the tray icon."""
 

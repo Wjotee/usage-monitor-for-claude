@@ -33,7 +33,7 @@ __all__ = [
     'diagnostic_post_init_rows', 'diagnostic_runtime_rows', 'diagnostic_system_rows',
     'double_click_seconds', 'get_idle_seconds', 'is_autostart_enabled',
     'is_screensaver_running', 'is_workstation_locked', 'load_font', 'no_window_kwargs', 'register_notification_identity',
-    'set_autostart', 'setup_console', 'show_error_box', 'show_topmost_error', 'show_warning_box',
+    'set_autostart', 'setup_console', 'show_error_box', 'show_notification', 'show_topmost_error', 'show_warning_box',
     'sync_autostart_path', 'system_time_format', 'taskbar_uses_light_theme', 'watch_theme_change',
 ]
 
@@ -480,13 +480,23 @@ def sync_autostart_path() -> None:
         set_autostart(True)
 
 
-def register_notification_identity() -> None:
-    """No-op.
+def register_notification_identity() -> bool:
+    """No-op that reports no registered identity.
 
     The Windows counterpart pins a toast identity so notifications do not
     borrow the live tray icon.  Freedesktop notifications carry their icon
     per message instead, so there is no process-wide identity to register.
     """
+    return False
+
+
+def show_notification(icon: Any, message: str, title: str, identity_registered: bool) -> None:
+    """Show a notification through the tray icon.
+
+    ``identity_registered`` is accepted for the shared platform API and
+    ignored: Freedesktop notifications need no separate identity.
+    """
+    icon.notify(message, title)
 
 
 def setup_console() -> None:
