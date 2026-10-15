@@ -41,6 +41,15 @@ REUSE_WINDOW = True
 
 _MARGIN = 8
 
+_BASELINE_DPI = 96
+
+# Relative deviation from _BASELINE_DPI below which WebKitGTK leaves the page
+# zoom at 1.0; see _css_scale().
+_ZOOM_THRESHOLD = 0.02
+
+# First WebKitGTK (major, minor) that zooms pages by the font resolution.
+_WEBKIT_DPI_ZOOM_VERSION = (2, 46)
+
 # Seconds between safety-net checks in the dismiss watch; see watch_dismiss().
 _WATCH_HEARTBEAT = 2.0
 
@@ -71,6 +80,7 @@ class PopupHost:
         self._window = window
         self._width = width
         self._height = 0
+        self._scale = 1.0
         self._keep_position = False
         self._dismissed = threading.Event()
         self._should_dismiss: Callable[[], bool] = lambda: False
@@ -104,13 +114,15 @@ class PopupHost:
     def apply_geometry(self, height: int, *, keep_position: bool) -> None:
         """Resize to *height* and remember whether the anchor still applies.
 
-        Only the resize happens here.  Positioning is deferred to
-        :meth:`reveal`, because a move on an unmapped window is discarded;
-        once the window is mapped, the move is applied immediately.
+        *height* is in CSS pixels; the window gets the content size times
+        :meth:`_css_scale`.  Only the resize happens here.  Positioning is
+        deferred to :meth:`reveal`, because a move on an unmapped window is
+        discarded; once the window is mapped, the move is applied immediately.
         """
-        self._height = height
+        self._scale = self._css_scale()
+        self._height = round(height * self._scale)
         self._keep_position = keep_position
-        self._window.resize(self._width, height)
+        self._window.resize(round(self._width * self._scale), self._height)
 
         if not keep_position:
             self._on_main_loop(self._move_to_anchor)
@@ -177,7 +189,7 @@ class PopupHost:
         Windows host there is no cross-monitor DPI correction to make.
         """
         self._dragging = False
-        self._height = height
+        self._height = round(height * self._scale)
 
     def _reveal_on_main_loop(self, gtk_window: Any) -> None:
         """Map, position and focus the window.  Runs on the GTK main loop."""
@@ -233,7 +245,7 @@ class PopupHost:
 
         work = monitor.get_workarea()
         geometry = monitor.get_geometry()
-        x = work.x + work.width - self._width - _MARGIN
+        x = work.x + work.width - round(self._width * self._scale) - _MARGIN
 
         bottom_panel = work.y == geometry.y and work.y + work.height < geometry.y + geometry.height
         if bottom_panel:
@@ -325,6 +337,55 @@ class PopupHost:
             return BrowserView.instances[self._window.uid].window
         except Exception:
             return None
+
+    def _css_scale(self) -> float:
+        """Return how many window pixels one CSS pixel of the popup needs.
+
+        WebKitGTK zooms every page by the font resolution over 96 dpi
+        (``refreshInternalScaling()`` in ``WebKitWebViewBase.cpp``), while GTK
+        scales the window only by its integer scale factor.  At 250% on X11
+        (``Xft.dpi`` 240, GTK scale 2) GDK reports 120 dpi, the page is zoomed
+        by 1.25 on top of the scale factor, and a window sized to the content
+        would cut its bottom off.  A text scaling factor has the same effect,
+        on every backend.
+
+        On GTK 3 WebKit reads the resolution through the same
+        ``gdk_screen_get_resolution()`` call, and it keeps the zoom at 1.0 for
+        a resolution within ``_ZOOM_THRESHOLD`` of 96 dpi, so this does too.
+        """
+        if not self._webkit_zooms_by_dpi():
+            return 1.0
+
+        display = self._display()
+        if display is None:
+            return 1.0
+
+        # GDK reports -1 when no resolution is configured.
+        resolution = display.get_default_screen().get_resolution()
+        if resolution <= 0:
+            return 1.0
+
+        scale = resolution / _BASELINE_DPI
+        if abs(scale - 1) <= _ZOOM_THRESHOLD:
+            return 1.0
+
+        return scale
+
+    def _webkit_zooms_by_dpi(self) -> bool:
+        """Return whether the WebKitGTK in use zooms pages by the font resolution.
+
+        The zoom arrived with WebKitGTK 2.46 (WebKit commit 5713584438, bug
+        247980).  Before that the resolution scaled text only and a CSS pixel
+        stayed one window pixel, so enlarging the window would leave blank
+        space.  pywebview has already chosen the ``WebKit2`` version by the
+        time a popup exists, so the import gets the library actually in use.
+        """
+        try:
+            from gi.repository import WebKit2
+        except ImportError:
+            return False
+
+        return (WebKit2.get_major_version(), WebKit2.get_minor_version()) >= _WEBKIT_DPI_ZOOM_VERSION
 
     def _display(self) -> Any:
         """Return the default Gdk display, or None without a session."""

@@ -18,7 +18,7 @@ if sys.platform == 'win32':
     raise unittest.SkipTest('GTK popup host is not used on Windows')
 
 from usage_monitor_for_claude.platforms.popup_linux import (  # noqa: E402
-    _FOCUS_SETTLE_SECONDS, _KEY_ESCAPE, _MARGIN, REUSE_WINDOW, WINDOW_KWARGS, PopupHost, popup_url,
+    _FOCUS_SETTLE_SECONDS, _KEY_ESCAPE, _MARGIN, _ZOOM_THRESHOLD, REUSE_WINDOW, WINDOW_KWARGS, PopupHost, popup_url,
 )
 
 WIDTH = 340
@@ -30,6 +30,7 @@ def _host(window=None, gtk_window=None):
     gtk_window = gtk_window or MagicMock()
     host._gtk_window = lambda: gtk_window
     host._on_main_loop = lambda action: action(gtk_window)
+    host._css_scale = lambda: 1.0
 
     return host, gtk_window
 
@@ -202,7 +203,7 @@ class TestApplyGeometry(unittest.TestCase):
     """Tests for resizing and repositioning."""
 
     def test_resize_uses_logical_pixels(self):
-        """GTK reports and consumes logical pixels, so no DPI arithmetic is needed."""
+        """GTK reports and consumes logical pixels, so at 96 dpi the window takes the CSS size as is."""
         window = MagicMock()
         host, _ = _host(window)
         with patch.object(host, '_primary_monitor', return_value=_monitor()):
@@ -230,6 +231,143 @@ class TestApplyGeometry(unittest.TestCase):
         host.apply_geometry(565, keep_position=True)
         window.resize.assert_called_once_with(WIDTH, 565)
         gtk_window.move.assert_not_called()
+
+
+def _display_with_resolution(resolution):
+    """Build a Gdk display whose default screen reports *resolution* dpi."""
+    display = MagicMock()
+    display.get_default_screen.return_value.get_resolution.return_value = resolution
+
+    return display
+
+
+class TestCssScale(unittest.TestCase):
+    """Tests for matching the window size to WebKit's page zoom.
+
+    WebKitGTK zooms the page by the font resolution over 96 dpi while GTK
+    scales the window only by an integer factor, so a window sized to the
+    content in CSS pixels would give the page less than it needs.
+    """
+
+    def _scale(self, display, webkit_zooms=True):
+        host = PopupHost(MagicMock(), WIDTH)
+        with patch.object(host, '_display', return_value=display), \
+             patch.object(host, '_webkit_zooms_by_dpi', return_value=webkit_zooms):
+            return host._css_scale()
+
+    def test_webkit_without_dpi_zoom_leaves_the_size_alone(self):
+        """Before WebKitGTK 2.46 a CSS pixel is one window pixel at any resolution."""
+        self.assertEqual(self._scale(_display_with_resolution(120.0), webkit_zooms=False), 1.0)
+
+    def test_fractional_scale_enlarges_the_window(self):
+        """Xft.dpi 240 at GTK scale 2 reports 120 dpi: the page gets 1/1.25 of the window."""
+        self.assertEqual(self._scale(_display_with_resolution(120.0)), 1.25)
+
+    def test_any_backend_follows_the_resolution(self):
+        """WebKit zooms on every backend, so a Wayland text scaling factor of 1.5 counts too."""
+        self.assertEqual(self._scale(_display_with_resolution(144.0)), 1.5)
+
+    def test_baseline_resolution_leaves_the_size_alone(self):
+        self.assertEqual(self._scale(_display_with_resolution(96.0)), 1.0)
+
+    def test_unset_resolution_leaves_the_size_alone(self):
+        """GDK reports -1 when no resolution is configured."""
+        self.assertEqual(self._scale(_display_with_resolution(-1.0)), 1.0)
+
+    def test_no_display_leaves_the_size_alone(self):
+        self.assertEqual(self._scale(None), 1.0)
+
+    def test_without_pygobject_leaves_the_size_alone(self):
+        """The real ``_display()`` returns None when ``gi`` cannot be imported."""
+        host = PopupHost(MagicMock(), WIDTH)
+        with patch.dict(sys.modules, {'gi': None}):
+            self.assertEqual(host._css_scale(), 1.0)
+
+    def test_deviation_within_the_threshold_leaves_the_size_alone(self):
+        """WebKit keeps the zoom at 1.0 up to a 2% deviation, so the window must not grow either."""
+        for resolution in (96 * (1 - _ZOOM_THRESHOLD) + 0.1, 97.0, 96 * (1 + _ZOOM_THRESHOLD) - 0.1):
+            with self.subTest(resolution=resolution):
+                self.assertEqual(self._scale(_display_with_resolution(resolution)), 1.0)
+
+    def test_deviation_beyond_the_threshold_scales(self):
+        for resolution in (93.0, 98.0):
+            with self.subTest(resolution=resolution):
+                self.assertEqual(self._scale(_display_with_resolution(resolution)), resolution / 96)
+
+
+class TestWebKitVersionGate(unittest.TestCase):
+    """Tests for detecting a WebKitGTK that zooms pages by the font resolution."""
+
+    def _zooms(self, major, minor):
+        webkit = MagicMock(get_major_version=lambda: major, get_minor_version=lambda: minor)
+        host = PopupHost(MagicMock(), WIDTH)
+        with patch.dict(sys.modules, {'gi': MagicMock(), 'gi.repository': MagicMock(WebKit2=webkit)}):
+            return host._webkit_zooms_by_dpi()
+
+    def test_versions_before_2_46_do_not_zoom(self):
+        for major, minor in ((2, 44), (2, 40), (1, 99)):
+            with self.subTest(version=(major, minor)):
+                self.assertFalse(self._zooms(major, minor))
+
+    def test_versions_from_2_46_zoom(self):
+        for major, minor in ((2, 46), (2, 50), (3, 0)):
+            with self.subTest(version=(major, minor)):
+                self.assertTrue(self._zooms(major, minor))
+
+    def test_without_pygobject_reports_no_zoom(self):
+        host = PopupHost(MagicMock(), WIDTH)
+        with patch.dict(sys.modules, {'gi': None}):
+            self.assertFalse(host._webkit_zooms_by_dpi())
+
+
+class TestScaledGeometry(unittest.TestCase):
+    """Tests for sizing and anchoring the window at a fractional scale."""
+
+    def _scaled_host(self):
+        window = MagicMock()
+        host, gtk_window = _host(window)
+        host._css_scale = lambda: 1.25
+
+        return host, window
+
+    def test_resize_covers_the_scaled_content(self):
+        host, window = self._scaled_host()
+        host.apply_geometry(400, keep_position=True)
+        window.resize.assert_called_once_with(round(WIDTH * 1.25), 500)
+
+    def test_anchor_uses_the_scaled_width(self):
+        """The window is wider than the content, so the corner offset must follow."""
+        host, _window = self._scaled_host()
+        host.apply_geometry(400, keep_position=True)
+
+        with patch.object(host, '_primary_monitor', return_value=_monitor(work_x=0, work_y=32, work_width=1920)):
+            self.assertEqual(host._anchor(), (1920 - round(WIDTH * 1.25) - _MARGIN, 32 + _MARGIN))
+
+    def test_bottom_anchor_uses_the_scaled_height(self):
+        """Above a bottom panel the window is taller than the content, so it has to sit higher."""
+        host, _window = self._scaled_host()
+        host.apply_geometry(400, keep_position=True)
+
+        with patch.object(host, '_primary_monitor', return_value=_bottom_panel_monitor()):
+            self.assertEqual(host._anchor(), (2560 + 3440 - round(WIDTH * 1.25) - _MARGIN, 1032 - 500 - _MARGIN))
+
+    def test_move_after_resize_uses_the_scaled_size(self):
+        """An unpinned popup is moved right after the resize, with the size the resize applied."""
+        window = MagicMock()
+        host, gtk_window = _host(window)
+        host._css_scale = lambda: 1.25
+
+        with patch.object(host, '_primary_monitor', return_value=_bottom_panel_monitor()):
+            host.apply_geometry(400, keep_position=False)
+
+        window.resize.assert_called_once_with(round(WIDTH * 1.25), 500)
+        gtk_window.move.assert_called_once_with(2560 + 3440 - round(WIDTH * 1.25) - _MARGIN, 1032 - 500 - _MARGIN)
+
+    def test_end_drag_keeps_the_scaled_height(self):
+        host, _window = self._scaled_host()
+        host.apply_geometry(400, keep_position=True)
+        host.end_drag(400)
+        self.assertEqual(host._height, 500)
 
 
 class TestDismissWatch(unittest.TestCase):
