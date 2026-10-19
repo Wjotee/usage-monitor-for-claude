@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-[Show all code changes](https://github.com/jens-duttke/usage-monitor-for-claude/compare/v1.23.0...HEAD)
+[Show all code changes](https://github.com/jens-duttke/usage-monitor-for-claude/compare/v1.24.0...HEAD)
+
+## [1.24.0] - 2026-10-19
 
 ### Changed
 
@@ -21,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Linux the app no longer grows by about 200 MB each time you open the detail popup - previously every opening left WebKit processes behind until the app quit, adding up to more than 1 GB over a few days (thanks to [@gurkengraeber](https://github.com/gurkengraeber) for the contribution)
 - On Linux with a fractional display scale such as 250%, or with enlarged text, the detail popup now shows its full content - previously its bottom, including the version number, was cut off and the content was squeezed narrower than intended (thanks to [@gurkengraeber](https://github.com/gurkengraeber) for the contribution)
 - On Windows, keystrokes in other apps no longer go missing while the detail popup is open - previously typed characters could get lost, Print Screen did nothing and Win+Shift+S never opened the Snipping Tool, most noticeably with the popup pinned (thanks to [@nerfarrow](https://github.com/nerfarrow) for reporting [#104](https://github.com/jens-duttke/usage-monitor-for-claude/issues/104) and fixing it in [#105](https://github.com/jens-duttke/usage-monitor-for-claude/pull/105))
+
+[Show all code changes](https://github.com/jens-duttke/usage-monitor-for-claude/compare/v1.23.0...v1.24.0)
 
 ## [1.23.0] - 2026-09-22
 
