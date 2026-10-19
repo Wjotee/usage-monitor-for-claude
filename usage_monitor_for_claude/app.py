@@ -338,17 +338,20 @@ class UsageMonitorForClaude:
         try:
             needs_profile = not self.cache.profile
             needs_refresh = self._should_refresh_usage()
-            if needs_profile or needs_refresh:
-                # Single thread: ensure_profile() and update() both acquire
-                # cache._lock, so they must run sequentially.  Two threads
-                # would cause update()'s non-blocking acquire to fail while
-                # ensure_profile() holds the lock.
-                def _bg_refresh() -> None:
-                    if needs_profile:
-                        self.cache.ensure_profile()
-                    if needs_refresh:
-                        self.update()
-                threading.Thread(target=_bg_refresh, daemon=True).start()
+
+            # Single thread: ensure_profile(), update() and ensure_prepaid()
+            # all acquire cache._lock, so they must run sequentially.  Two
+            # threads would cause update()'s non-blocking acquire to fail while
+            # another call holds the lock.  The balance comes last because it
+            # needs the organization from the profile, and is skipped when the
+            # update has just read it.
+            def _bg_refresh() -> None:
+                if needs_profile:
+                    self.cache.ensure_profile()
+                if needs_refresh:
+                    self.update()
+                self.cache.ensure_prepaid()
+            threading.Thread(target=_bg_refresh, daemon=True).start()
             UsagePopup(self, self._popup_windows)
         finally:
             self._popup_closed_at = time.time()
@@ -417,7 +420,7 @@ class UsageMonitorForClaude:
             confirmed account switch, where the freshly selected account
             has no polling history that those throttles need to protect.
         """
-        result = self.cache.update(force=force)
+        result = self.cache.update(force=force, with_prepaid=self._popup_open)
         if result.data is None:
             return
 

@@ -7,6 +7,8 @@ snapshot consistency, and state management.
 """
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -677,7 +679,7 @@ class TestTokenRefresh(unittest.TestCase):
 
         with patch.object(cache, '_try_token_refresh', wraps=cache._try_token_refresh) as spy:
             cache.update()
-            spy.assert_called_once_with('token-123')
+            spy.assert_called_once_with('token-123', with_prepaid=False)
 
     @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_ERROR_DATA)
     def test_non_auth_error_skips_refresh(self, _mock_fetch):
@@ -1000,16 +1002,16 @@ _EXTRA_USAGE_DATA = {**_SUCCESS_DATA, 'extra_usage': {'is_enabled': True, 'used_
 
 
 class TestPrepaidBalance(unittest.TestCase):
-    """Tests for fetching the prepaid credit balance alongside the usage data."""
+    """Tests for fetching the prepaid credit balance alongside the usage data while the popup is open."""
 
     @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
     @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_EXTRA_USAGE_DATA)
     def test_success_stores_balance(self, _mock_fetch, mock_prepaid):
-        """A successful usage fetch stores the balance for the same cycle."""
+        """A successful usage fetch with the popup open stores the balance for the same cycle."""
         cache = _make_cache()
         cache._profile = _ORG_PROFILE
 
-        cache.update()
+        cache.update(with_prepaid=True)
 
         mock_prepaid.assert_called_once_with('org-uuid-1')
         self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
@@ -1024,7 +1026,7 @@ class TestPrepaidBalance(unittest.TestCase):
                 cache = _make_cache()
                 cache._profile = profile
 
-                cache.update()
+                cache.update(with_prepaid=True)
 
                 mock_prepaid.assert_not_called()
                 self.assertIsNone(cache.prepaid)
@@ -1036,7 +1038,7 @@ class TestPrepaidBalance(unittest.TestCase):
         cache = _make_cache()
         cache._profile = _ORG_PROFILE
 
-        result = cache.update()
+        result = cache.update(with_prepaid=True)
 
         self.assertEqual(result.data, _EXTRA_USAGE_DATA)
         self.assertEqual(cache.usage, _EXTRA_USAGE_DATA)
@@ -1045,14 +1047,16 @@ class TestPrepaidBalance(unittest.TestCase):
         self.assertIsNone(cache.prepaid)
 
     @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=None)
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
     @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_EXTRA_USAGE_DATA)
-    def test_balance_cleared_when_no_longer_available(self, _mock_fetch, mock_prepaid):
+    def test_balance_cleared_when_no_longer_available(self, _mock_fetch, _mock_token, mock_prepaid):
         """A balance that disappears is cleared instead of being shown stale."""
         cache = _make_cache()
         cache._profile = _ORG_PROFILE
         cache._prepaid = _PREPAID_BALANCE
+        cache._prepaid_token = 'tok'
 
-        cache.update()
+        cache.update(with_prepaid=True)
 
         self.assertIsNone(cache.prepaid)
         mock_prepaid.assert_called_once()
@@ -1064,7 +1068,7 @@ class TestPrepaidBalance(unittest.TestCase):
         cache = _make_cache()
         cache._profile = _ORG_PROFILE
 
-        cache.update()
+        cache.update(with_prepaid=True)
 
         mock_prepaid.assert_not_called()
         self.assertIsNone(cache.prepaid)
@@ -1079,10 +1083,42 @@ class TestPrepaidBalance(unittest.TestCase):
         cache = _make_cache()
         cache._profile = _ORG_PROFILE
 
-        cache.update()
+        cache.update(with_prepaid=True)
 
         mock_prepaid.assert_called_once_with('org-uuid-1')
         self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
+
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    @patch('usage_monitor_for_claude.cache.refresh_token')
+    @patch('usage_monitor_for_claude.cache.read_access_token', side_effect=['tok-a', 'tok-b'])
+    @patch('usage_monitor_for_claude.cache.fetch_usage')
+    def test_recovered_auth_error_in_background_skips_balance(self, mock_fetch, _mock_token, _mock_refresh, mock_prepaid):
+        """A background poll that recovers a 401 sends no balance request either."""
+        mock_fetch.side_effect = [_AUTH_ERROR_DATA, _EXTRA_USAGE_DATA]
+        cache = _make_cache()
+        cache._profile = _ORG_PROFILE
+
+        cache.update()
+
+        mock_prepaid.assert_not_called()
+        self.assertEqual(cache.usage, _EXTRA_USAGE_DATA)
+
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok-new')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_EXTRA_USAGE_DATA)
+    def test_changed_token_rereads_balance_within_cooldown(self, _mock_fetch, _mock_token, mock_prepaid):
+        """With the popup open, a balance read with another token is replaced in the same cycle despite the cooldown."""
+        cache = _make_cache()
+        cache._profile = _ORG_PROFILE
+        cache._prepaid = {'amount_minor': 1.0, 'currency': 'USD', 'decimal_places': 2}
+        cache._prepaid_token = 'tok-old'
+        cache._prepaid_read_at = time.time()
+
+        cache.update(with_prepaid=True)
+
+        mock_prepaid.assert_called_once_with('org-uuid-1')
+        self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
+        self.assertEqual(cache._prepaid_token, 'tok-new')
 
     @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits')
     @patch('usage_monitor_for_claude.cache.fetch_usage')
@@ -1094,10 +1130,191 @@ class TestPrepaidBalance(unittest.TestCase):
                 cache = _make_cache()
                 cache._profile = _ORG_PROFILE
 
-                cache.update()
+                cache.update(with_prepaid=True)
 
                 mock_prepaid.assert_not_called()
                 self.assertIsNone(cache.prepaid)
+
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_EXTRA_USAGE_DATA)
+    def test_background_poll_skips_request_and_keeps_balance(self, _mock_fetch, _mock_token, mock_prepaid):
+        """With the popup closed only the usage is fetched; the last balance of the same account is kept."""
+        cache = _make_cache()
+        cache._profile = _ORG_PROFILE
+        cache._prepaid = _PREPAID_BALANCE
+        cache._prepaid_token = 'tok'
+
+        cache.update()
+
+        mock_prepaid.assert_not_called()
+        self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
+
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok-new')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_EXTRA_USAGE_DATA)
+    def test_balance_of_other_token_dropped(self, _mock_fetch, _mock_token, _mock_prepaid):
+        """A balance read with another token is not shown next to the new account's usage, and is due again."""
+        cache = _make_cache()
+        cache._profile = _ORG_PROFILE
+        cache._prepaid = _PREPAID_BALANCE
+        cache._prepaid_token = 'tok-old'
+        cache._prepaid_read_at = 10 ** 12
+
+        cache.update()
+
+        self.assertIsNone(cache.prepaid)
+        self.assertIsNone(cache._prepaid_read_at)
+
+    @patch('usage_monitor_for_claude.cache.time')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_EXTRA_USAGE_DATA)
+    def test_update_within_balance_cooldown_skips_request(self, mock_fetch, _mock_token, mock_prepaid, mock_time):
+        """A usage fetch less than POLL_FAST after the last balance read does not read it again."""
+        cache = _make_cache()
+        cache._profile = _ORG_PROFILE
+        cache._usage = _EXTRA_USAGE_DATA
+        cache._usage_token = 'tok'
+        mock_time.time.return_value = 1000.0
+        cache.ensure_prepaid()
+
+        mock_time.time.return_value = 1050.0
+        cache.update(with_prepaid=True)
+
+        mock_fetch.assert_called_once()
+        mock_prepaid.assert_called_once()
+        self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
+
+    @patch('usage_monitor_for_claude.cache.time')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_EXTRA_USAGE_DATA)
+    def test_update_after_balance_cooldown_reads_again(self, _mock_fetch, _mock_token, mock_prepaid, mock_time):
+        """An open popup gets a fresh balance with every usage fetch once POLL_FAST has passed."""
+        cache = _make_cache()
+        cache._profile = _ORG_PROFILE
+        mock_time.time.return_value = 1000.0
+        cache.update(with_prepaid=True)
+
+        mock_time.time.return_value = 1121.0
+        cache.update(with_prepaid=True)
+
+        self.assertEqual(mock_prepaid.call_count, 2)
+
+
+# ---------------------------------------------------------------------------
+# ensure_prepaid (popup opening)
+# ---------------------------------------------------------------------------
+
+def _cache_with_extra_usage() -> UsageCache:
+    """Return a cache holding usage with extra usage enabled and a known organization."""
+    cache = _make_cache()
+    cache._profile = _ORG_PROFILE
+    cache._usage = _EXTRA_USAGE_DATA
+    cache._usage_token = 'tok'
+
+    return cache
+
+
+class TestEnsurePrepaid(unittest.TestCase):
+    """Tests for reading the prepaid credit balance when the popup opens."""
+
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    def test_reads_balance(self, mock_prepaid):
+        """Opening the popup reads the balance at once and publishes it to the snapshot."""
+        cache = _cache_with_extra_usage()
+        version_before = cache.version
+
+        cache.ensure_prepaid()
+
+        mock_prepaid.assert_called_once_with('org-uuid-1')
+        self.assertEqual(cache.snapshot.prepaid, _PREPAID_BALANCE)
+        self.assertGreater(cache.version, version_before)
+
+    @patch('usage_monitor_for_claude.cache.fetch_usage')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    def test_does_not_fetch_usage(self, _mock_prepaid, mock_fetch):
+        """Reading the balance leaves the usage cooldown untouched, so reset alignment is unaffected."""
+        cache = _cache_with_extra_usage()
+
+        cache.ensure_prepaid()
+
+        mock_fetch.assert_not_called()
+        self.assertIsNone(cache.last_success_time)
+
+    @patch('usage_monitor_for_claude.cache.time')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    def test_within_cooldown_skips_request(self, mock_prepaid, mock_time):
+        """A second opening within POLL_FAST reuses the balance; the next one after it reads again."""
+        cache = _cache_with_extra_usage()
+        mock_time.time.return_value = 1000.0
+        cache.ensure_prepaid()
+
+        mock_time.time.return_value = 1119.0
+        cache.ensure_prepaid()
+        self.assertEqual(mock_prepaid.call_count, 1)
+
+        mock_time.time.return_value = 1120.0
+        cache.ensure_prepaid()
+        self.assertEqual(mock_prepaid.call_count, 2)
+
+    @patch('usage_monitor_for_claude.cache.time')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    def test_backward_clock_jump_reads_again(self, mock_prepaid, mock_time):
+        """A read timestamp in the future after a clock jump does not block the next read."""
+        cache = _cache_with_extra_usage()
+        cache._prepaid_read_at = 5000.0
+        mock_time.time.return_value = 1000.0
+
+        cache.ensure_prepaid()
+
+        mock_prepaid.assert_called_once()
+        self.assertEqual(cache._prepaid_read_at, 1000.0)
+
+    @patch('usage_monitor_for_claude.cache.time')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    def test_skipped_during_rate_limit_backoff(self, mock_prepaid, mock_time):
+        """No balance request is sent against an endpoint that answered 429."""
+        cache = _cache_with_extra_usage()
+        cache._prepaid = _PREPAID_BALANCE
+        mock_time.time.return_value = 1000.0
+        cache._rate_limit_until = 1500.0
+
+        cache.ensure_prepaid()
+
+        mock_prepaid.assert_not_called()
+        self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
+        self.assertIsNone(cache._prepaid_read_at)
+
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    def test_without_extra_usage_makes_no_request(self, mock_prepaid):
+        """Without usage data or with extra usage disabled, no request is made and the next read stays due."""
+        for usage in ({}, _SUCCESS_DATA, {**_SUCCESS_DATA, 'extra_usage': {'is_enabled': False}}):
+            with self.subTest(usage=usage):
+                cache = _cache_with_extra_usage()
+                cache._usage = usage
+
+                cache.ensure_prepaid()
+
+                mock_prepaid.assert_not_called()
+                self.assertIsNone(cache.prepaid)
+                self.assertIsNone(cache._prepaid_read_at)
+
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=_PREPAID_BALANCE)
+    def test_waits_for_update_in_flight(self, mock_prepaid):
+        """A balance read by the update holding the lock is not read a second time."""
+        cache = _cache_with_extra_usage()
+        cache._lock.acquire()
+        opener = threading.Thread(target=cache.ensure_prepaid)
+        opener.start()
+        opener.join(0.1)
+        cache._prepaid_read_at = time.time()
+        cache._lock.release()
+        opener.join(5)
+
+        self.assertFalse(opener.is_alive())
+        mock_prepaid.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

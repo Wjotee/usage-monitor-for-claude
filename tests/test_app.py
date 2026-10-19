@@ -1782,6 +1782,31 @@ class TestMenuActions(unittest.TestCase):
         mock_popup.assert_called_once_with(self.app, self.app._popup_windows)
         self.assertFalse(self.app._popup_open)
 
+    def _run_open_refresh(self, *, has_profile: bool, needs_refresh: bool) -> list[str]:
+        """Open the popup, run its background refresh inline and return the cache calls in order."""
+        calls: list[str] = []
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {}} if has_profile else None
+        self.app.cache.ensure_profile.side_effect = lambda: calls.append('profile')
+        self.app.cache.ensure_prepaid.side_effect = lambda: calls.append('prepaid')
+        self.app._popup_open = True
+        with patch.object(self.app, '_should_refresh_usage', return_value=needs_refresh), \
+             patch.object(self.app, 'update', side_effect=lambda: calls.append('usage')), \
+             patch('usage_monitor_for_claude.app.UsagePopup'), \
+             patch('usage_monitor_for_claude.app.threading.Thread') as mock_thread:
+            self.app._open_popup()
+            mock_thread.call_args.kwargs['target']()
+
+        return calls
+
+    def test_open_popup_reads_balance_after_profile_and_usage(self):
+        """The balance needs the organization from the profile and is skipped when the update just read it."""
+        self.assertEqual(self._run_open_refresh(has_profile=False, needs_refresh=True), ['profile', 'usage', 'prepaid'])
+
+    def test_open_popup_reads_balance_with_fresh_usage(self):
+        """Usage still within its cooldown does not keep the balance from being read on opening."""
+        self.assertEqual(self._run_open_refresh(has_profile=True, needs_refresh=False), ['prepaid'])
+
     def test_on_quit_stops_running(self):
         """on_quit() sets running to False and stops the icon."""
         self.app.on_quit()
@@ -3187,11 +3212,17 @@ class TestUpdateForce(unittest.TestCase):
 
     def test_force_forwarded_to_cache_update(self):
         self.app.update(force=True)
-        self.app.cache.update.assert_called_once_with(force=True)
+        self.app.cache.update.assert_called_once_with(force=True, with_prepaid=False)
 
     def test_default_not_forced(self):
         self.app.update()
-        self.app.cache.update.assert_called_once_with(force=False)
+        self.app.cache.update.assert_called_once_with(force=False, with_prepaid=False)
+
+    def test_open_popup_reads_prepaid_balance(self):
+        """The prepaid balance is read along with the usage only while the popup shows it."""
+        self.app._popup_open = True
+        self.app.update()
+        self.app.cache.update.assert_called_once_with(force=False, with_prepaid=True)
 
 
 # ---------------------------------------------------------------------------

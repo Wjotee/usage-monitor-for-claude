@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - On Linux with KDE Plasma, a left-click on the tray icon now opens the detail popup directly, as on Windows - previously it opened the tray menu, and the popup needed a second click on its first entry. The menu stays on the right-click (thanks to [@gurkengraeber](https://github.com/gurkengraeber) for the contribution)
+- With extra usage enabled, the prepaid credit balance is now only requested while the detail popup is open - right when it opens, then at most every two minutes. Background polling sends half as many requests as before, which makes Anthropic's rate limit less likely to block the usage display
 
 ### Fixed
 

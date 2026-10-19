@@ -76,6 +76,8 @@ class UsageCache:
         self._profile: dict[str, Any] | None = None
         self._profile_token: str | None = None
         self._prepaid: dict[str, Any] | None = None
+        self._prepaid_token: str | None = None
+        self._prepaid_read_at: float | None = None
         self._last_success_time: float | None = None
         self._refreshing = False
         self._last_error: str | None = None
@@ -97,7 +99,7 @@ class UsageCache:
 
     @property
     def prepaid(self) -> dict[str, Any] | None:
-        """Prepaid credit balance from the last successful fetch, or None."""
+        """Prepaid credit balance from the last read for the current token, or None."""
         return self._prepaid
 
     @property
@@ -184,7 +186,30 @@ class UsageCache:
                 self._version += 1
             log.info('fetch_profile -> %s', 'OK' if profile else 'failed')
 
-    def update(self, *, force: bool = False) -> UpdateResult:
+    def ensure_prepaid(self) -> None:
+        """Read the prepaid credit balance unless it was read within ``POLL_FAST`` (thread-safe).
+
+        Called when the popup opens.  The balance is shown nowhere else, so
+        the background polling does not keep it current, and a popup whose
+        usage data is still within the cooldown would otherwise show a
+        balance from its previous opening.  Waits for an update in flight,
+        which may read the balance itself, and skips the request during a
+        rate-limit backoff.
+        """
+        if not self._prepaid_due():
+            return
+
+        with self._lock:
+            if not self._prepaid_due():
+                return
+
+            if time.time() < self._rate_limit_until:
+                log.debug('ensure_prepaid skipped (rate-limit backoff, %.0fs remaining)', self._rate_limit_until - time.time())
+                return
+
+            self._refresh_prepaid(self._usage, self._usage_token)
+
+    def update(self, *, force: bool = False, with_prepaid: bool = False) -> UpdateResult:
         """Fetch usage data with lock and cooldown protection.
 
         Parameters
@@ -196,6 +221,12 @@ class UsageCache:
             selected account has no polling history, so it cannot be the
             source of a rate limit those throttles guard against.  The
             update lock is still honored, so concurrent fetches never run.
+        with_prepaid : bool
+            When True, a successful fetch also reads the prepaid credit
+            balance, unless it was read within the last ``POLL_FAST``
+            seconds.  Set only while the popup is open, the one place the
+            balance is shown, so polling in the background costs a single
+            request per cycle.
 
         Returns
         -------
@@ -209,13 +240,13 @@ class UsageCache:
             return UpdateResult(data=None)
 
         try:
-            return self._update_locked(force=force)
+            return self._update_locked(force=force, with_prepaid=with_prepaid)
         finally:
             self._lock.release()
 
     # Private helpers
 
-    def _update_locked(self, *, force: bool = False) -> UpdateResult:
+    def _update_locked(self, *, force: bool = False, with_prepaid: bool = False) -> UpdateResult:
         """Execute the actual update while holding ``_lock``."""
         # Clamp epoch-based throttle state after a backward clock jump
         # (manual correction, NTP step, VM restore) - otherwise cooldown and
@@ -246,14 +277,14 @@ class UsageCache:
             self._version += 1
 
         try:
-            return self._fetch_and_process()
+            return self._fetch_and_process(with_prepaid=with_prepaid)
         except Exception:
             with self._state_lock:
                 self._refreshing = False
                 self._version += 1
             raise
 
-    def _fetch_and_process(self) -> UpdateResult:
+    def _fetch_and_process(self, *, with_prepaid: bool = False) -> UpdateResult:
         """Fetch usage data and process the response."""
         token_before = read_access_token()
         log.info('fetch_usage started')
@@ -268,7 +299,7 @@ class UsageCache:
             token_refresh = None
             if data.get('auth_error'):
                 log.warning('fetch_usage -> auth error, attempting token refresh')
-                token_refresh, retry_data = self._try_token_refresh(token_before)
+                token_refresh, retry_data = self._try_token_refresh(token_before, with_prepaid=with_prepaid)
                 if token_refresh is not None and self._last_error is None:
                     # Token refresh succeeded and retry was successful
                     return UpdateResult(data=self._usage, token_refresh=token_refresh, token=self._usage_token)
@@ -291,36 +322,53 @@ class UsageCache:
         pct_5h = (data.get('five_hour') or {}).get('utilization')
         pct_7d = (data.get('seven_day') or {}).get('utilization')
         log.info('fetch_usage -> OK (5h: %s%%, 7d: %s%%)', pct_5h if pct_5h is not None else '?', pct_7d if pct_7d is not None else '?')
-        self._record_success(data, token_before, self._fetch_prepaid_balance(data))
+        self._record_success(data, token_before)
+        if with_prepaid and self._prepaid_due():
+            self._refresh_prepaid(data, token_before)
+
         return UpdateResult(data=data, token=token_before)
 
-    def _fetch_prepaid_balance(self, usage: dict[str, Any]) -> dict[str, Any] | None:
-        """Return the prepaid credit balance for the current organization.
+    def _prepaid_due(self) -> bool:
+        """Whether the last balance read is ``POLL_FAST`` or more seconds old.
 
-        Read only while extra usage is enabled, which the popup requires to
-        render the balance at all, so an account that can never show it does
-        not pay for reading it.  The request runs in the same cycle as the
-        usage fetch and therefore inherits the cooldown, the 429 backoff and
-        the adaptive cadence of ``_update_locked``.  The balance is
+        A read timestamp in the future (backward clock jump) counts as due,
+        so the cooldown cannot block reads until the clock catches up.
+        """
+        if self._prepaid_read_at is None:
+            return True
+
+        elapsed = time.time() - self._prepaid_read_at
+
+        return not 0 <= elapsed < POLL_FAST
+
+    def _refresh_prepaid(self, usage: dict[str, Any], token: str | None) -> None:
+        """Read and store the prepaid credit balance for the current organization.
+
+        The caller holds ``_lock``.  Read only while extra usage is enabled,
+        which the popup requires to render the balance at all, so an account
+        that can never show it does not pay for reading it.  The balance is
         supplementary: without a known organization uuid, or on any failure,
-        it stays None and the usage result is unaffected.
+        it is None and the usage result is unaffected.
 
         Parameters
         ----------
         usage : dict
-            Successful usage response of the current cycle.
+            Latest successful usage response.
+        token : str or None
+            Access token *usage* was fetched with, which the balance is
+            stored against.
         """
-        if not (usage.get('extra_usage') or {}).get('is_enabled'):
-            return None
-
+        prepaid = None
         org_uuid = ((self._profile or {}).get('organization') or {}).get('uuid')
-        if not org_uuid:
-            return None
+        if (usage.get('extra_usage') or {}).get('is_enabled') and org_uuid:
+            prepaid = fetch_prepaid_credits(org_uuid)
+            log.debug('fetch_prepaid_credits -> %s', 'OK' if prepaid else 'unavailable')
+            self._prepaid_read_at = time.time()
 
-        prepaid = fetch_prepaid_credits(org_uuid)
-        log.debug('fetch_prepaid_credits -> %s', 'OK' if prepaid else 'unavailable')
-
-        return prepaid
+        with self._state_lock:
+            self._prepaid = prepaid
+            self._prepaid_token = token
+            self._version += 1
 
     def _apply_rate_limit_backoff(self, data: dict[str, Any]) -> None:
         """Arm the 429 backoff window from a rate-limited error response.
@@ -356,8 +404,12 @@ class UsageCache:
                 error += f'\n{server_msg}'
             self._last_error = error
 
-    def _record_success(self, data: dict[str, Any], token: str | None, prepaid: dict[str, Any] | None) -> None:
+    def _record_success(self, data: dict[str, Any], token: str | None) -> None:
         """Apply common state updates after a successful API response.
+
+        A balance read with a different token may belong to another account,
+        so it is dropped rather than shown next to this account's usage, and
+        the next read is due at once.
 
         Parameters
         ----------
@@ -365,9 +417,6 @@ class UsageCache:
             Successful API response.
         token : str or None
             Access token that was in effect when the request was sent.
-        prepaid : dict or None
-            Prepaid credit balance fetched in the same cycle, or None when
-            unavailable.
         """
         # _usage is always reassigned (never mutated in place), so existing
         # CacheSnapshot references remain valid after this update.
@@ -379,11 +428,13 @@ class UsageCache:
             self._last_failed_token = None
             self._usage = data
             self._usage_token = token
-            self._prepaid = prepaid
+            if token != self._prepaid_token:
+                self._prepaid = None
+                self._prepaid_read_at = None
             self._refreshing = False
             self._version += 1
 
-    def _try_token_refresh(self, token_before: str | None) -> tuple[RefreshResult | None, dict[str, Any] | None]:
+    def _try_token_refresh(self, token_before: str | None, *, with_prepaid: bool = False) -> tuple[RefreshResult | None, dict[str, Any] | None]:
         """Obtain a working access token after a 401 and retry the usage fetch.
 
         If the credentials already hold a different token - the user
@@ -396,6 +447,9 @@ class UsageCache:
         ----------
         token_before : str or None
             The token that was used for the failed request.
+        with_prepaid : bool
+            Read the prepaid credit balance after a successful retry, as
+            ``update()`` does after a successful fetch.
 
         Returns
         -------
@@ -427,7 +481,10 @@ class UsageCache:
         data = fetch_usage()
         if 'error' not in data:
             log.info('retry -> OK')
-            self._record_success(data, current_token, self._fetch_prepaid_balance(data))
+            self._record_success(data, current_token)
+            if with_prepaid and self._prepaid_due():
+                self._refresh_prepaid(data, current_token)
+
             return result, data
 
         log.warning('retry -> error: %s', data['error'])
