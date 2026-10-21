@@ -34,7 +34,7 @@ from .settings import (
 from .formatting import elapsed_pct, field_period, format_credits, format_tooltip, is_active_quota, parse_field_name, popup_label
 from .i18n import T
 from .popup import UsagePopup, new_window_cache
-from .tray_icon import create_icon_image, create_status_image
+from .crisp_tray_icon import create_icon_image, create_status_image, install_exact_icon_handle
 
 __all__ = ['UsageMonitorForClaude', 'crash_log']
 
@@ -178,6 +178,7 @@ class UsageMonitorForClaude:
                 pystray.MenuItem(T['quit'], self.on_quit),
             ),
         )
+        install_exact_icon_handle(self.icon)
 
         # Only wired up when a command is configured, so the platform's own
         # single-click behavior is otherwise untouched.  Not every platform
