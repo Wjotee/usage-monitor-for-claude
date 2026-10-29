@@ -133,22 +133,21 @@ class TestPixelColors(unittest.TestCase):
                         img = crisp_mod.create_icon_image(pct_top, pct_bottom, light, time_pct_top=30, time_pct_bottom=50, size=size)
                         self._assert_palette_only(img, allowed, range(_digit_rows(size).stop, size))
 
-    def test_symbols_use_palette_colors_only(self):
-        """The idle 'C', the cross and '$' are whole-pixel shapes."""
+    def test_symbols_keep_the_foreground_color(self):
+        """The cross and '$' are font glyphs: they fade only through alpha."""
         for light in (False, True):
-            colors = crisp_mod.ICON_DARK if light else crisp_mod.ICON_LIGHT
-            allowed = {TRANSPARENT, colors['fg'], colors['fg_half'], colors['fg_warn']}
+            fg = (crisp_mod.ICON_DARK if light else crisp_mod.ICON_LIGHT)['fg']
             for size in TRAY_SIZES:
-                for pct_top, extra in ((0, False), (100, False), (100, True)):
-                    with self.subTest(light=light, size=size, pct_top=pct_top, extra=extra):
-                        img = crisp_mod.create_icon_image(pct_top, 30, light, extra_usage_available=extra, size=size)
-                        self._assert_palette_only(img, allowed)
+                for extra in (False, True):
+                    with self.subTest(light=light, size=size, extra=extra):
+                        img = crisp_mod.create_icon_image(100, 30, light, extra_usage_available=extra, size=size)
+                        self._assert_foreground_rgb(img, fg, _digit_rows(size))
 
     def test_digits_keep_the_foreground_color(self):
         for light in (False, True):
             fg = (crisp_mod.ICON_DARK if light else crisp_mod.ICON_LIGHT)['fg']
             for size in TRAY_SIZES:
-                for pct_top in (7, 45, 88):
+                for pct_top in (0, 7, 45, 88):
                     with self.subTest(light=light, size=size, pct_top=pct_top):
                         img = crisp_mod.create_icon_image(pct_top, 30, light, size=size)
                         self._assert_foreground_rgb(img, fg, _digit_rows(size))
@@ -167,7 +166,7 @@ class TestPixelColors(unittest.TestCase):
             for text in ('!', 'C!'):
                 with self.subTest(size=size, text=text):
                     img = crisp_mod.create_status_image(text, size=size)
-                    self._assert_palette_only(img, {TRANSPARENT, crisp_mod.ICON_LIGHT['fg_dim']})
+                    self._assert_foreground_rgb(img, crisp_mod.ICON_LIGHT['fg_dim'], range(size))
 
     def test_pixel_digit_fallback_uses_palette_colors_only(self):
         """Without the clock's typeface the digits fall back to whole-pixel shapes."""

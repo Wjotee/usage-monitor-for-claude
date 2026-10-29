@@ -41,6 +41,10 @@ TRANSPARENT = (0, 0, 0, 0)
 CLOCK_STROKE_RATIO = 0.023
 CROSS = '✕'
 
+# Characters drawn in the clock's typeface.  The clock font has no '✕', so the cross is drawn as an 'X'.
+DIGITS = '0123456789'
+_CLOCK_FONT_CHARS = frozenset(DIGITS + 'C$!X')
+
 # Glyphs on a 3 x 5 cell grid.  Columns: left stem, counter, right stem.
 # Rows: top bar, upper counter, middle bar, lower counter, bottom bar.  The
 # cell sizes are worked out per icon size from the stroke widths, so one
@@ -302,9 +306,12 @@ def _draw_usage_bar(draw: ImageDraw.ImageDraw, layout: IconLayout, y: int, pct: 
 
 def _draw_text(draw: ImageDraw.ImageDraw, text: str, metrics: GlyphMetrics, icon_size: int, top: int, fill: tuple) -> None:
     """Draw *text* horizontally centered in the icon within the *metrics.height* rows starting at *top*."""
-    clock_font = _clock_digit_font(metrics.height) if text.isdigit() else None
+    clock_text = text.replace(CROSS, 'X')
+    # The '$' stands taller than the digits, so it sets the size and baseline instead of being clipped.
+    reference = '$' if '$' in clock_text else DIGITS
+    clock_font = _clock_digit_font(metrics.height, reference) if _CLOCK_FONT_CHARS.issuperset(clock_text) else None
     if clock_font is not None:
-        _draw_clock_digits(draw, text, clock_font, metrics.height, icon_size, top, fill)
+        _draw_clock_digits(draw, clock_text, clock_font, metrics.height, icon_size, top, fill, reference)
         return
 
     advances = [_glyph_width(char, metrics, icon_size) for char in text]
@@ -315,7 +322,7 @@ def _draw_text(draw: ImageDraw.ImageDraw, text: str, metrics: GlyphMetrics, icon
 
 
 @functools.lru_cache(maxsize=None)
-def _clock_digit_font(height: int) -> ImageFont.FreeTypeFont | None:
+def _clock_digit_font(height: int, reference: str = DIGITS) -> ImageFont.FreeTypeFont | None:
     """Return the clock's typeface at the largest size whose digits fit *height* rows, or None if it is unavailable.
 
     The size is chosen by the inked digit height rather than by point size:
@@ -328,7 +335,7 @@ def _clock_digit_font(height: int) -> ImageFont.FreeTypeFont | None:
         font = load_clock_font(pixel_size)
         if font is None:
             return None
-        _left, ink_top, _right, ink_bottom = _ink_box(font, '0123456789', 0)
+        _left, ink_top, _right, ink_bottom = _ink_box(font, reference, 0)
         if ink_bottom - ink_top <= height:
             return font
         pixel_size -= 0.5
@@ -337,7 +344,7 @@ def _clock_digit_font(height: int) -> ImageFont.FreeTypeFont | None:
 
 
 def _draw_clock_digits(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, height: int, icon_size: int, top: int,
-        fill: tuple) -> None:
+        fill: tuple, reference: str = DIGITS) -> None:
     """Draw digits in the clock's typeface, centered horizontally and in the *height* rows starting at *top*.
 
     The origin stays on whole pixels so the font's hinting lines stems up with
@@ -350,7 +357,7 @@ def _draw_clock_digits(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.Fre
     """
     stroke = font.size * CLOCK_STROKE_RATIO
     text_left, _text_top, text_right, _text_bottom = _ink_box(font, text, stroke)
-    _digits_left, digits_top, _digits_right, digits_bottom = _ink_box(font, '0123456789', 0)
+    _digits_left, digits_top, _digits_right, digits_bottom = _ink_box(font, reference, 0)
     x = (icon_size - (text_right - text_left)) // 2 - text_left
     y = top + (height - (digits_bottom - digits_top)) // 2 - digits_top
 
